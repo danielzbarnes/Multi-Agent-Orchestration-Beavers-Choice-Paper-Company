@@ -599,7 +599,7 @@ dotenv.load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = os.getenv("BASE_URL")
 
-model = OpenAIServerModel(model_id="gpt-4-0613", api_key=API_KEY, api_base=BASE_URL, max_tokens=2000)
+model = OpenAIServerModel(model_id="gpt-4-0613", api_key=API_KEY, api_base=BASE_URL, max_tokens=200)
 
 
 """Set up tools for your agents to use, these should be methods that combine the database functions above
@@ -750,44 +750,9 @@ def generate_quote(order_size: str, as_of_date: str, items_requested: Dict[str, 
     all_inventory = get_all_inventory(as_of_date)
     
     
-    
+       
 @tool
-def search_quote_history_impl(search_terms: List[str], limit: int = 5) -> List[Dict[str, any]]:
-    """
-    Implementation function for searching historical quotes based on provided search terms.
-
-    This function performs the actual database query to retrieve quotes that match the search criteria.
-
-    Args:
-        search_terms (List[str]): A list of keywords to search for in the quote history.
-        limit (int, optional): The maximum number of matching quotes to return. Default is 5.
-
-    Returns:
-        List[Dict[str, Any]]: A list of dictionaries, each representing a matching quote with fields such as 'original_request', 'total_amount', 'quote_explanation', 'job_type', 'order_size', 'event_type', and 'order_date'.
-    """
-    
-    query = """
-        SELECT
-            *
-        FROM quotes
-        WHERE """ + " OR ".join([
-            f"LOWER(quote_explanation) LIKE :term_{i} OR LOWER(original_request) LIKE :term_{i}"
-            for i in range(len(search_terms))
-        ]) + """
-        ORDER BY order_date DESC
-        LIMIT :limit
-    """
-    
-    params = {f"term_{i}": f"%{term.lower()}%" for i, term in enumerate(search_terms)}
-    params["limit"] = limit
-    
-    df = pd.read_sql(query, db_engine, params=params)
-    return df.to_dict(orient="records")
-
-    
-    
-@tool
-def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict[str, any]]:
+def search_quote_history_tool(search_terms: List[str], limit: int = 5) -> List[Dict[str, any]]:
     """
     Tool for searching historical quotes based on provided search terms.
 
@@ -801,7 +766,7 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict[s
         List[Dict[str, Any]]: A list of dictionaries, each representing a matching quote with fields such as 'original_request', 'total_amount', 'quote_explanation', 'job_type', 'order_size', 'event_type', and 'order_date'.
     """
     # Implementation is handled by the underlying function defined above.
-    return search_quote_history_impl(search_terms, limit)
+    return search_quote_history(search_terms, limit)
 
 
 # Tools for ordering agent
@@ -913,7 +878,7 @@ inventory_agent = ToolCallingAgent(
 quoting_agent = ToolCallingAgent(
     name="QuotingAgent",
     model=model,
-    tools=[generate_quote, search_quote_history],
+    tools=[generate_quote, search_quote_history_tool],
     description="Agent responsible for generating pricing quotes for customer orders, applying discounts, and searching historical quotes for reference."
 )
 
@@ -1040,6 +1005,23 @@ def call_orchestrator(request: str) -> str:
 
 # Run your test scenarios by writing them here. Make sure to keep track of them.
 
+def summarize_results(results: list[dict]) -> None:
+    df = pd.DataFrame(results)
+    df.to_csv("test_results.csv", index=False)
+
+    fulfilled_count = int(df["fulfilled"].sum())
+    cash_changes = int(df["cash_balance"].diff().fillna(0).ne(0).sum())
+    unfulfilled_df = df[df["fulfilled"] == False]
+
+    print("\n=== Evaluation Summary ===")
+    print(f"Fulfilled requests: {fulfilled_count}")
+    print(f"Cash balance changes: {cash_changes}")
+    print(f"Unfulfilled requests: {len(unfulfilled_df)}")
+
+    if len(unfulfilled_df) > 0:
+        print("\nSample unfulfilled requests:")
+        print(unfulfilled_df[["request_id", "unfulfilled_reason"]].head())
+
 def run_test_scenarios():
     
     print("Initializing Database...")
@@ -1085,7 +1067,7 @@ def run_test_scenarios():
 
         # Process request
         request_with_date = f"{row['request']} (Date of request: {request_date})"
-        raw_response = call_orchestrator(request_with_date)
+        response = call_orchestrator(request_with_date)
 
         ############
         ############
@@ -1094,9 +1076,6 @@ def run_test_scenarios():
         ############
         ############
         ############
-
-        response = call_orchestrator(request_with_date)
-        
 
         # response = call_your_multi_agent_system(request_with_date)
         
@@ -1121,6 +1100,7 @@ def run_test_scenarios():
             order_response = place_order(items_sold, total_amount, request_date)
             print(f"Order Response: {order_response}")
             
+            
 
         # Update state
         report = generate_financial_report_tool(request_date)
@@ -1144,6 +1124,9 @@ def run_test_scenarios():
                 "response": json.dumps(response_data)
             }
         )
+
+        summarize_results(results)
+
 
         time.sleep(1)
 
