@@ -4,6 +4,7 @@ import os
 import time
 import dotenv
 import ast
+import json
 from sqlalchemy.sql import text
 from datetime import datetime, timedelta
 from typing import Dict, List, Union
@@ -598,7 +599,7 @@ dotenv.load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = os.getenv("BASE_URL")
 
-model = OpenAIServerModel(model_id="gpt-4-0613", api_key=API_KEY, api_base=BASE_URL)
+model = OpenAIServerModel(model_id="gpt-4-0613", api_key=API_KEY, api_base=BASE_URL, max_tokens=2000)
 
 
 """Set up tools for your agents to use, these should be methods that combine the database functions above
@@ -748,6 +749,43 @@ def generate_quote(order_size: str, as_of_date: str, items_requested: Dict[str, 
     price_map = dict(zip(inv_df["item_name"], inv_df["unit_price"]))
     all_inventory = get_all_inventory(as_of_date)
     
+    
+    
+@tool
+def search_quote_history_impl(search_terms: List[str], limit: int = 5) -> List[Dict[str, any]]:
+    """
+    Implementation function for searching historical quotes based on provided search terms.
+
+    This function performs the actual database query to retrieve quotes that match the search criteria.
+
+    Args:
+        search_terms (List[str]): A list of keywords to search for in the quote history.
+        limit (int, optional): The maximum number of matching quotes to return. Default is 5.
+
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries, each representing a matching quote with fields such as 'original_request', 'total_amount', 'quote_explanation', 'job_type', 'order_size', 'event_type', and 'order_date'.
+    """
+    
+    query = """
+        SELECT
+            *
+        FROM quotes
+        WHERE """ + " OR ".join([
+            f"LOWER(quote_explanation) LIKE :term_{i} OR LOWER(original_request) LIKE :term_{i}"
+            for i in range(len(search_terms))
+        ]) + """
+        ORDER BY order_date DESC
+        LIMIT :limit
+    """
+    
+    params = {f"term_{i}": f"%{term.lower()}%" for i, term in enumerate(search_terms)}
+    params["limit"] = limit
+    
+    df = pd.read_sql(query, db_engine, params=params)
+    return df.to_dict(orient="records")
+
+    
+    
 @tool
 def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict[str, any]]:
     """
@@ -763,10 +801,46 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict[s
         List[Dict[str, Any]]: A list of dictionaries, each representing a matching quote with fields such as 'original_request', 'total_amount', 'quote_explanation', 'job_type', 'order_size', 'event_type', and 'order_date'.
     """
     # Implementation is handled by the underlying function defined above.
-    return search_quote_history(search_terms, limit)
+    return search_quote_history_impl(search_terms, limit)
 
 
 # Tools for ordering agent
+
+@tool
+def get_cash_balance_tool(as_of_date: str) -> float:
+    """
+    Tool for retrieving the current cash balance as of a specific date.
+
+    This function calculates the net cash balance by summing all sales revenue and subtracting all stock purchase costs recorded in the transactions table up to the given date.
+
+    Args:
+        as_of_date (str): The date (in ISO format) to calculate the cash balance as of.
+
+    Returns:
+        float: The net cash balance available as of the specified date.
+    """
+    return get_cash_balance(as_of_date)
+
+@tool
+def generate_financial_report_tool(as_of_date: str) -> Dict:
+    """
+    Tool for generating a comprehensive financial report as of a specific date.
+
+    This function compiles key financial metrics including cash balance, inventory valuation, total assets, and identifies top-selling products. It provides a detailed snapshot of the company's financial health at the given point in time.
+
+    Args:
+        as_of_date (str): The date (in ISO format) to generate the financial report for.
+
+    Returns:
+        Dict: A dictionary containing:
+            - 'as_of_date': The date of the report
+            - 'cash_balance': Total cash available
+            - 'inventory_value': Total value of inventory
+            - 'total_assets': Combined cash and inventory value
+            - 'inventory_summary': List of items with stock and valuation details
+            - 'top_selling_products': List of top 5 products by revenue
+    """
+    return generate_financial_report(as_of_date)
 
 @tool
 def place_order(items_sold: Dict, total_price: float, order_date: str) -> str:
@@ -843,6 +917,13 @@ quoting_agent = ToolCallingAgent(
     description="Agent responsible for generating pricing quotes for customer orders, applying discounts, and searching historical quotes for reference."
 )
 
+finance_agent = ToolCallingAgent(
+    name="FinanceAgent",
+    model=model,
+    tools=[get_cash_balance_tool, generate_financial_report_tool],
+    description="Agent responsible for monitoring the company's financial health, including cash balance and inventory valuation, and generating comprehensive financial reports."
+)
+
 ordering_agent = ToolCallingAgent(
     name="OrderingAgent",
     model=model,
@@ -850,11 +931,72 @@ ordering_agent = ToolCallingAgent(
     description="Agent responsible for processing customer orders, recording sales transactions, and generating sales reports."
 )
 
+@tool
+def ask_inventory_agent(request: str) -> str:
+    """
+    Tool for the Orchestrator to query the InventoryAgent with a specific request.
+
+    This function allows the Orchestrator to send a request to the InventoryAgent and receive a response, facilitating communication between agents in the multi-agent system.
+
+    Args:
+        request (str): The request or inquiry to be sent to the InventoryAgent.
+
+    Returns:
+        str: The response generated by the InventoryAgent after processing the request.
+    """
+    return str(inventory_agent.run(request, max_tokens=500))
+
+@tool
+def ask_quoting_agent(request: str) -> str:
+    """
+    Tool for the Orchestrator to query the QuotingAgent with a specific request.
+
+    This function allows the Orchestrator to send a request to the QuotingAgent and receive a response, facilitating communication between agents in the multi-agent system.
+
+    Args:
+        request (str): The request or inquiry to be sent to the QuotingAgent.
+
+    Returns:
+        str: The response generated by the QuotingAgent after processing the request.
+    """
+    return str(quoting_agent.run(request))
+
+@tool
+def ask_ordering_agent(request: str) -> str:
+    """
+    Tool for the Orchestrator to query the OrderingAgent with a specific request.
+
+    This function allows the Orchestrator to send a request to the OrderingAgent and receive a response, facilitating communication between agents in the multi-agent system.
+
+    Args:
+        request (str): The request or inquiry to be sent to the OrderingAgent.
+
+    Returns:
+        str: The response generated by the OrderingAgent after processing the request.
+    """
+    return str(ordering_agent.run(request))
+
+@tool
+def ask_finance_agent(request: str) -> str:
+    """
+    Tool for the Orchestrator to query the FinanceAgent with a specific request.
+
+    This function allows the Orchestrator to send a request to the FinanceAgent and receive a response, facilitating communication between agents in the multi-agent system.
+
+    Args:
+        request (str): The request or inquiry to be sent to the FinanceAgent.
+
+    Returns:
+        str: The response generated by the FinanceAgent after processing the request.
+    """
+    return str(finance_agent.run(request))
+
+
 orchestrator = ToolCallingAgent(
     name="Orchestrator",
     model=model,
-    tools=[check_inventory, reorder_inventory, get_inventory_snapshot, generate_quote, search_quote_history, place_order, get_sales_report],
-    description="Central agent responsible for coordinating between the InventoryAgent, QuotingAgent, and OrderingAgent to handle customer requests end-to-end, ensuring that inventory levels are sufficient, quotes are generated accurately, and orders are processed efficiently."
+    tools=[ask_inventory_agent, ask_quoting_agent, ask_finance_agent, ask_ordering_agent],
+    description="Central agent responsible for coordinating worker agents and delegating tasks to them."
 )
 
 ORCHESTRATOR_SYSTEM_PROMPT = """
@@ -867,6 +1009,15 @@ When a customer request comes in, you will:
 4. Use the QuotingAgent to generate a pricing quote for the customer based on the requested items and quantities, applying any relevant discounts.
 5. If the customer accepts the quote, coordinate with the OrderingAgent to record the sale and update inventory levels accordingly.
 6. Continuously monitor inventory and sales data to ensure that the company maintains optimal stock levels and meets customer demand efficiently. Always provide clear and concise responses to customer inquiries, and
+
+You must ALWAYS return valid JSON with the following fields:
+{
+  "fulfilled": true/false,
+  "total_amount": float,
+  "items_sold": { "item_name": quantity, ... },
+  "reason": "string if unfulfilled",
+  "customer_message": "string"
+}
 
 """
 
@@ -934,6 +1085,7 @@ def run_test_scenarios():
 
         # Process request
         request_with_date = f"{row['request']} (Date of request: {request_date})"
+        raw_response = call_orchestrator(request_with_date)
 
         ############
         ############
@@ -949,17 +1101,29 @@ def run_test_scenarios():
         # response = call_your_multi_agent_system(request_with_date)
         
         try:
-            response_dict = ast.literal_eval(response)
+            response_data = json.loads(response)
+            """
             total_amount = response_dict.get("total_amount", 0.0)
             items_sold = response_dict.get("items_sold", {})
             if items_sold and total_amount > 0:
                 place_order(items_sold, total_amount, request_date)
+            """
         except Exception as e:
             print(f"Error processing response: {e}")
             print(f"Raw response: {response}")
+            
+        fulfilled = response_data.get("fulfilled", False)
+        total_amount = response_data.get("total_amount", 0.0)
+        items_sold = response_data.get("items_sold", {})
+        reason = response_data.get("reason", "")
+        
+        if fulfilled and items_sold and total_amount > 0:
+            order_response = place_order(items_sold, total_amount, request_date)
+            print(f"Order Response: {order_response}")
+            
 
         # Update state
-        report = generate_financial_report(request_date)
+        report = generate_financial_report_tool(request_date)
         current_cash = report["cash_balance"]
         current_inventory = report["inventory_value"]
 
@@ -971,9 +1135,13 @@ def run_test_scenarios():
             {
                 "request_id": idx + 1,
                 "request_date": request_date,
+                "fulfilled": fulfilled,
+                "total_amount": total_amount,
+                "items_sold": json.dumps(items_sold),
                 "cash_balance": current_cash,
                 "inventory_value": current_inventory,
-                "response": response,
+                "unfulfilled_reason": reason,
+                "response": json.dumps(response_data)
             }
         )
 
