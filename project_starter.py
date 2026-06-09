@@ -749,6 +749,41 @@ def generate_quote(order_size: str, as_of_date: str, items_requested: Dict[str, 
     price_map = dict(zip(inv_df["item_name"], inv_df["unit_price"]))
     all_inventory = get_all_inventory(as_of_date)
     
+    missing_items = [item for item in items_requested if inventory.get(item,0) < qty]
+    
+    
+    if missing_items:
+        return {
+            "fulfilled": False,
+            "total_amount": 0.0,
+            "items_sold": {},
+            "reason": f"Insufficient stock for: {', '.join(missing_items)}",
+            "customer_message": (
+                "We’re unable to fully fulfill your request at this time due to "
+                f"limited stock of: {', '.join(missing_items)}."
+            )
+        }
+
+    subtotal = sum(price_map[item] * qty for item, qty in items_requested.items())
+
+    total = round(subtotal * (1 - discount_rate), 2)
+
+    discount_msg = (
+        f"A {int(discount_rate * 100)}% bulk discount has been applied."
+        if discount_rate > 0 else
+        "No bulk discount applies for this order size."
+    )
+
+    return {
+        "fulfilled": True,
+        "total_amount": total,
+        "items_sold": items_requested,
+        "reason": "",
+        "customer_message": (
+            f"Your order can be fulfilled. {discount_msg} "
+            f"The total price is ${total:.2f}."
+        )
+    }
     
        
 @tool
