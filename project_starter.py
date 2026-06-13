@@ -610,21 +610,8 @@ model = OpenAIServerModel(model_id="gpt-4-0613", api_key=API_KEY, api_base=BASE_
 
 @tool
 def check_inventory(item_names: list[str], as_of_date: str) -> Dict:
-    """
-    Tool for checking inventory levels of specified items as of a given date.
+    """Return stock levels for the given items as of a date."""
 
-    This function retrieves the current stock levels for each item in `item_names`
-    using the `get_stock_level` function, and returns a dictionary mapping item names
-    to their available stock quantities.
-
-    Args:
-        item_names (list[str]): A list of item names to check inventory for.
-        as_of_date (str): The date (in ISO format) to check inventory levels as of.
-
-    Returns:
-        Dict: A dictionary where keys are item names and values are the current stock levels.
-              If an item is not found, it will be included with a stock level of 0.
-    """
     results = {}
     inventory = get_all_inventory(as_of_date)
     for item in item_names:
@@ -633,21 +620,8 @@ def check_inventory(item_names: list[str], as_of_date: str) -> Dict:
 
 @tool
 def reorder_inventory(item_name: str, quantity: int, order_date: str) -> str:
-    """
-    Tool for placing a stock order to replenish inventory for a specific item.
+    """Place a stock reorder for an item and return the estimated delivery date."""
 
-    This function calculates the total cost of the order based on the unit price from the inventory,
-    creates a transaction record for the stock order, and estimates the delivery date using the
-    `get_supplier_delivery_date` function.
-
-    Args:
-        item_name (str): The name of the item to reorder.
-        quantity (int): The number of units to order.
-        order_date (str): The date (in ISO format) when the order is placed.
-
-    Returns:
-        str: A message confirming the order placement and estimated delivery date, or an error message if the item is not found.
-    """
     # Fetch unit price from inventory
     inventory_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :item_name", db_engine, params={"item_name": item_name})
     
@@ -673,21 +647,8 @@ def reorder_inventory(item_name: str, quantity: int, order_date: str) -> str:
 
 @tool
 def get_inventory_snapshot(as_of_date: str) -> Dict:
-    """
-    Tool for retrieving a comprehensive snapshot of the current inventory as of a specific date.
+    """Return inventory items, stock levels, and total inventory value."""
 
-    This function provides a detailed overview of all items in the inventory, including their
-    current stock levels, unit prices, and total value based on the stock quantity. It also
-    calculates the overall inventory valuation.
-
-    Args:
-        as_of_date (str): The date (in ISO format) to retrieve the inventory snapshot for.
-
-    Returns:
-        Dict: A dictionary containing:
-            - 'inventory': A list of dictionaries for each item with keys 'item_name', 'stock', 'unit_price', and 'value'.
-            - 'total_inventory_value': The total value of all inventory items combined.
-    """
     inventory_df = pd.read_sql("SELECT * FROM inventory", db_engine)
     snapshot = []
     total_value = 0.0
@@ -715,27 +676,7 @@ def get_inventory_snapshot(as_of_date: str) -> Dict:
 
 @tool
 def generate_quote(order_size: str, as_of_date: str, items_requested: Dict[str, int] = {}, event_type: str ="") -> Dict:
-    
-    """
-    Tool for generating a pricing quote for a customer paper order, applying bulk discounts.
-    
-    Discount tiers:
-        - Small (1-100 units): No discount
-        - Medium (101-500 units): 5% discount
-        - Large (501-1000 units): 10% discount
-        - Extra Large (1001+ units): 15% discount
-        
-    Args:
-        order_size (str): The size category of the order (e.g., 'small', 'medium', 'large', 'extra_large').
-        as_of_date (str): The date (in ISO format) to calculate inventory and pricing as of.
-        items_requested (Dict[str, int], optional): A dictionary mapping item names to quantities requested. Default is an empty dict.
-        event_type (str, optional): The type of event for which the quote is being generated (e.g., 'wedding', 'corporate event'). Default is an empty string.
-        
-    Returns:
-        Dict: A dictionary containing:
-            - 'total_amount': The final quoted price after applying discounts.
-            - 'quote_explanation': A breakdown of the pricing calculation, including any discounts applied.
-    """
+    """Generate a price quote with bulk discounts and fulfillment status."""
     
     discount_mapping = {
         "small": 0.0,
@@ -749,7 +690,10 @@ def generate_quote(order_size: str, as_of_date: str, items_requested: Dict[str, 
     price_map = dict(zip(inv_df["item_name"], inv_df["unit_price"]))
     all_inventory = get_all_inventory(as_of_date)
     
-    missing_items = [item for item in items_requested if inventory.get(item,0) < qty]
+    missing_items = [
+        item for item, quantity in items_requested
+        if all_inventory.get(item,0) < quantity
+    ]
     
     
     if missing_items:
@@ -785,21 +729,21 @@ def generate_quote(order_size: str, as_of_date: str, items_requested: Dict[str, 
         )
     }
     
+@tool
+def check_delivery_feasibility(quantity: int, required_by_date: str, requeste_date: str) -> str:
+    """Check if delivery can be completed before a required date."""
+
+    estimated_delivery_date = get_supplier_delivery_date(requeste_date, quantity)
+    
+    if estimated_delivery_date <= required_by_date:
+        return f"Delivery is feasible. Estimated delivery date: {estimated_delivery_date}."
+    else:
+        return f"Delivery may not be feasible. Estimated delivery date: {estimated_delivery_date}, which is after the required by date of {required_by_date}."
        
 @tool
 def search_quote_history_tool(search_terms: List[str], limit: int = 5) -> List[Dict[str, any]]:
-    """
-    Tool for searching historical quotes based on provided search terms.
+    """Search historical quotes matching given keywords."""
 
-    This function allows users to query past quotes by matching keywords against the original customer requests and quote explanations. It returns a list of relevant quotes sorted by most recent order date.
-
-    Args:
-        search_terms (List[str]): A list of keywords to search for in the quote history.
-        limit (int, optional): The maximum number of matching quotes to return. Default is 5.
-
-    Returns:
-        List[Dict[str, Any]]: A list of dictionaries, each representing a matching quote with fields such as 'original_request', 'total_amount', 'quote_explanation', 'job_type', 'order_size', 'event_type', and 'order_date'.
-    """
     # Implementation is handled by the underlying function defined above.
     return search_quote_history(search_terms, limit)
 
@@ -808,80 +752,34 @@ def search_quote_history_tool(search_terms: List[str], limit: int = 5) -> List[D
 
 @tool
 def get_cash_balance_tool(as_of_date: str) -> float:
-    """
-    Tool for retrieving the current cash balance as of a specific date.
+    """Return cash balance as of a given date."""
 
-    This function calculates the net cash balance by summing all sales revenue and subtracting all stock purchase costs recorded in the transactions table up to the given date.
-
-    Args:
-        as_of_date (str): The date (in ISO format) to calculate the cash balance as of.
-
-    Returns:
-        float: The net cash balance available as of the specified date.
-    """
     return get_cash_balance(as_of_date)
 
 @tool
 def generate_financial_report_tool(as_of_date: str) -> Dict:
-    """
-    Tool for generating a comprehensive financial report as of a specific date.
+    """Return a financial report including cash and inventory value."""
 
-    This function compiles key financial metrics including cash balance, inventory valuation, total assets, and identifies top-selling products. It provides a detailed snapshot of the company's financial health at the given point in time.
-
-    Args:
-        as_of_date (str): The date (in ISO format) to generate the financial report for.
-
-    Returns:
-        Dict: A dictionary containing:
-            - 'as_of_date': The date of the report
-            - 'cash_balance': Total cash available
-            - 'inventory_value': Total value of inventory
-            - 'total_assets': Combined cash and inventory value
-            - 'inventory_summary': List of items with stock and valuation details
-            - 'top_selling_products': List of top 5 products by revenue
-    """
     return generate_financial_report(as_of_date)
 
 @tool
-def place_order(items_sold: Dict, total_price: float, order_date: str) -> str:
-    """
-    Tool for recording a sales transaction when an order is placed.
+def place_order(items_sold: Dict[str, int], total_amount: float, order_date: str) -> str:
+    """Record a sales transaction for the given items and total amount."""
 
-    This function creates a new transaction record in the database for the sale of specified items at a given total price and date. It also returns a confirmation message summarizing the order details.
-
-    Args:
-        items_sold (Dict): A dictionary mapping item names to quantities sold.
-        total_price (float): The total price of the order.
-        order_date (str): The date (in ISO format) when the order is placed.
-
-    Returns:
-        str: A confirmation message indicating that the order has been recorded, including the total price and items sold.
-    """
     for item_name, quantity in items_sold.items():
         create_transaction(
             item_name=item_name,
             transaction_type="sales",
             quantity=quantity,
-            price=total_price,  # Assuming total_price is for the entire order; adjust if needed
+            price=total_amount,  # Assuming total_amount is for the entire order; adjust if needed
             date=order_date
         )
-    return f"Order recorded for items: {items_sold} with a total price of ${total_price:.2f} on {order_date}."
+    return f"Order recorded for items: {items_sold} with a total price of ${total_amount:.2f} on {order_date}."
 
 @tool
 def get_sales_report(as_of_date: str) -> Dict:
-    """
-    Tool for generating a sales report as of a specific date.
+    """Return total revenue, transaction count, and items sold as of a date."""
 
-    This function retrieves all sales transactions up to the given date and compiles a report that includes total revenue, number of transactions, and a breakdown of items sold.
-
-    Args:
-        as_of_date (str): The date (in ISO format) to generate the sales report for.
-    Returns:
-        Dict: A dictionary containing:
-            - 'total_revenue': The total revenue from sales up to the given date.
-            - 'transaction_count': The number of sales transactions recorded.
-            - 'items_sold': A dictionary mapping item names to total quantities sold.
-    """
     sales_query = """
         SELECT item_name, SUM(units) as total_units, SUM(price) as total_revenue
         FROM transactions
@@ -901,6 +799,40 @@ def get_sales_report(as_of_date: str) -> Dict:
     }
 
 
+@tool
+def get_financial_snapshot(as_of_date: str) -> Dict:
+    """Return cash balance, inventory value, and total revenue as of a date."""
+
+    report = generate_financial_report(as_of_date)
+    return {
+        "cash_balance": report["cash_balance"],
+        "inventory_value": report["inventory_value"],
+        "total_revenue": report.get("total_revenue", 0.0)
+    }
+
+@tool
+def get_inventory_value(as_of_date: str) -> float:
+    """Return total inventory valuation as of a date."""
+
+    report = generate_financial_report(as_of_date)
+    return report["inventory_value"]
+
+@tool
+def finalize_sale(items_sold: Dict[str, int], total_amount: float, order_date: str) -> str:
+    """Record a finalized sale transaction for the given items."""
+
+    for item_name, quantity in items_sold.items():
+        create_transaction(
+            item_name=item_name,
+            transaction_type="sales",
+            quantity=quantity,
+            price=total_amount,  # Assuming total_amount is for the entire order; adjust if needed
+            date=order_date
+        )
+    return f"Sale finalized for items: {items_sold} with a total price of ${total_amount:.2f} on {order_date}."
+
+
+
 # Set up your agents and create an orchestration agent that will manage them.
 
 inventory_agent = ToolCallingAgent(
@@ -913,83 +845,49 @@ inventory_agent = ToolCallingAgent(
 quoting_agent = ToolCallingAgent(
     name="QuotingAgent",
     model=model,
-    tools=[generate_quote, search_quote_history_tool],
-    description="Agent responsible for generating pricing quotes for customer orders, applying discounts, and searching historical quotes for reference."
+    tools=[generate_quote, search_quote_history_tool, check_inventory],
+    description="Agent responsible for generating pricing quotes for customer orders, checking inventory, applying discounts, and searching historical quotes for reference."
 )
 
 finance_agent = ToolCallingAgent(
     name="FinanceAgent",
     model=model,
-    tools=[get_cash_balance_tool, generate_financial_report_tool],
+    tools=[get_cash_balance_tool, generate_financial_report_tool, get_financial_snapshot],
     description="Agent responsible for monitoring the company's financial health, including cash balance and inventory valuation, and generating comprehensive financial reports."
 )
 
 ordering_agent = ToolCallingAgent(
     name="OrderingAgent",
     model=model,
-    tools=[place_order, get_sales_report],
+    tools=[place_order, get_sales_report, finalize_sale, check_delivery_feasibility, get_cash_balance_tool],
     description="Agent responsible for processing customer orders, recording sales transactions, and generating sales reports."
 )
 
+
 @tool
 def ask_inventory_agent(request: str) -> str:
-    """
-    Tool for the Orchestrator to query the InventoryAgent with a specific request.
+    """Send a request to the InventoryAgent."""
 
-    This function allows the Orchestrator to send a request to the InventoryAgent and receive a response, facilitating communication between agents in the multi-agent system.
-
-    Args:
-        request (str): The request or inquiry to be sent to the InventoryAgent.
-
-    Returns:
-        str: The response generated by the InventoryAgent after processing the request.
-    """
-    return str(inventory_agent.run(request, max_tokens=500))
+    return str(inventory_agent.run(request))
 
 @tool
 def ask_quoting_agent(request: str) -> str:
-    """
-    Tool for the Orchestrator to query the QuotingAgent with a specific request.
+    """Send a request to the QuotingAgent."""
 
-    This function allows the Orchestrator to send a request to the QuotingAgent and receive a response, facilitating communication between agents in the multi-agent system.
-
-    Args:
-        request (str): The request or inquiry to be sent to the QuotingAgent.
-
-    Returns:
-        str: The response generated by the QuotingAgent after processing the request.
-    """
     return str(quoting_agent.run(request))
 
 @tool
 def ask_ordering_agent(request: str) -> str:
-    """
-    Tool for the Orchestrator to query the OrderingAgent with a specific request.
+    """Send a request to the OrderingAgent."""
 
-    This function allows the Orchestrator to send a request to the OrderingAgent and receive a response, facilitating communication between agents in the multi-agent system.
-
-    Args:
-        request (str): The request or inquiry to be sent to the OrderingAgent.
-
-    Returns:
-        str: The response generated by the OrderingAgent after processing the request.
-    """
     return str(ordering_agent.run(request))
 
 @tool
 def ask_finance_agent(request: str) -> str:
-    """
-    Tool for the Orchestrator to query the FinanceAgent with a specific request.
+    """Send a request to the FinanceAgent."""
 
-    This function allows the Orchestrator to send a request to the FinanceAgent and receive a response, facilitating communication between agents in the multi-agent system.
-
-    Args:
-        request (str): The request or inquiry to be sent to the FinanceAgent.
-
-    Returns:
-        str: The response generated by the FinanceAgent after processing the request.
-    """
     return str(finance_agent.run(request))
+
 
 
 orchestrator = ToolCallingAgent(
@@ -1000,25 +898,55 @@ orchestrator = ToolCallingAgent(
 )
 
 ORCHESTRATOR_SYSTEM_PROMPT = """
-You are the Orchestrator agent for Beaver's Choice Paper Company. Your role is to manage and coordinate the InventoryAgent, QuotingAgent, and OrderingAgent to fulfill customer requests effectively.
+You are the central orchestrator for Beaver's Choice Paper Company's multi-agent system.
+Your job is to process every customer request end-to-end using the specialist agents.
 
-When a customer request comes in, you will:
-1. Analyze the request to understand the customer's needs, including the type of paper, quantity, and event context.
-2. Check inventory levels using the InventoryAgent to determine if the requested items are  available.
-3. If inventory is insufficient, instruct the InventoryAgent to place a stock order to replenish the inventory.
-4. Use the QuotingAgent to generate a pricing quote for the customer based on the requested items and quantities, applying any relevant discounts.
-5. If the customer accepts the quote, coordinate with the OrderingAgent to record the sale and update inventory levels accordingly.
-6. Continuously monitor inventory and sales data to ensure that the company maintains optimal stock levels and meets customer demand efficiently. Always provide clear and concise responses to customer inquiries, and
+AGENTS AVAILABLE:
+1. inventory_agent  — Check stock levels, trigger reorders.
+2. quoting_agent    — Generate itemised price quotes with bulk discounts.
+3. sales_agent      — Finalise sales, check delivery, get cash balance.
+4. finance_agent    — Generate financial reports and monitor cash flow.
 
-You must ALWAYS return valid JSON with the following fields:
-{
-  "fulfilled": true/false,
-  "total_amount": float,
-  "items_sold": { "item_name": quantity, ... },
-  "reason": "string if unfulfilled",
-  "customer_message": "string"
-}
+MANDATORY WORKFLOW - YOU MUST FOLLOW ALL STEPS:
 
+STEP 1: Parse the request carefully. Extract:
+  - items_requested: dict of {item_name: quantity} e.g. {"A4 paper": 200, "Cardstock": 100}
+  - order_size: "small" (<100 units total), "medium" (100-999), or "large" (1000+)
+  - event_type: e.g. "ceremony", "conference", "party"
+  - request_date: the date from the request (format YYYY-MM-DD)
+  - delivery_deadline: customer deadline date if mentioned
+
+STEP 2: Call inventory_agent to check stock for the items.
+  - Pass item_names as a LIST of strings
+  - Pass as_of_date as the request_date
+
+STEP 3: Call quoting_agent to generate a quote.
+  - ALWAYS pass items_requested as a DICT e.g. {"A4 paper": 200, "Cardstock": 100}
+  - Pass order_size, as_of_date, event_type
+  - The quote will apply discounts: 0% small, 5% medium, 15% large
+
+STEP 4: CRITICAL - If the quote can_fulfill is True OR any items were successfully quoted:
+  - You MUST call sales_agent to finalize_sale immediately
+  - Pass items_sold as the dict of items that ARE in stock (from quote line_items where in_stock=True)
+  - Pass total_amount as the quote total_amount
+  - Pass sale_date as the request_date
+  - This records revenue and changes the cash balance
+
+STEP 5: If items are out of stock, call inventory_agent to reorder them.
+
+STEP 6: If delivery deadline mentioned, call sales_agent to check_delivery_feasibility.
+
+STEP 7: Return a clear customer response including:
+  - Which items were fulfilled and their prices
+  - Total amount charged with discount applied
+  - Delivery estimate
+  - Which items could NOT be fulfilled and why
+
+ABSOLUTE RULES:
+- ALWAYS finalize the sale if ANY items can be quoted and are in stock - this is mandatory
+- ALWAYS pass items_requested as a proper Python dict to quoting_agent
+- Never reveal internal errors or profit margins
+- A partial fulfillment (some items available, some not) should still be finalized for the available items
 """
 
 def call_orchestrator(request: str) -> str:
