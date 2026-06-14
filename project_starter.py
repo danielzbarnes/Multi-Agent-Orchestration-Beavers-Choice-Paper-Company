@@ -978,7 +978,7 @@ inventory_agent = ToolCallingAgent(
 quoting_agent = ToolCallingAgent(
     name="QuotingAgent",
     model=model,
-    tools=[generate_quote, search_quote_history_tool, check_inventory],
+    tools=[generate_quote, search_quote_history_tool],
     description="Agent responsible for generating pricing quotes for customer orders, checking inventory, applying discounts, and searching historical quotes for reference."
 )
 
@@ -1004,9 +1004,7 @@ def ask_inventory_agent(payload: Dict) -> str:
     Args:
         payload (str): The payload or inquiry to be sent to the InventoryAgent.
     """
-    if isinstance(payload, dict):
-        payload = json.dumps(payload)
-    return str(inventory_agent.run(payload))
+    return str(inventory_agent.run(json.dumps(payload)))
 
 @tool
 def ask_quoting_agent(payload: Dict) -> str:
@@ -1015,9 +1013,7 @@ def ask_quoting_agent(payload: Dict) -> str:
     Args:
         payload (str): The payload or inquiry to be sent to the QuotingAgent.
     """
-    if isinstance(payload, dict):
-        payload = json.dumps(payload)
-    return str(quoting_agent.run(payload))
+    return str(quoting_agent.run(json.dumps(payload)))
 
 @tool
 def ask_ordering_agent(payload: Dict) -> str:
@@ -1027,9 +1023,7 @@ def ask_ordering_agent(payload: Dict) -> str:
         payload (str): The payload or inquiry to be sent to the OrderingAgent.
     """
 
-    if isinstance(payload, dict):
-        payload = json.dumps(payload)
-    return str(ordering_agent.run(payload))
+    return str(ordering_agent.run(json.dumps(payload)))
 
 @tool
 def ask_finance_agent(payload: Dict) -> str:
@@ -1039,9 +1033,7 @@ def ask_finance_agent(payload: Dict) -> str:
         payload (str): The payload or inquiry to be sent to the FinanceAgent.
     """
 
-    if isinstance(payload, dict):
-        payload = json.dumps(payload)
-    return str(finance_agent.run(payload))
+    return str(finance_agent.run(json.dumps(payload)))
 
 
 orchestrator = ToolCallingAgent(
@@ -1052,103 +1044,92 @@ orchestrator = ToolCallingAgent(
 )
 
 ORCHESTRATOR_SYSTEM_PROMPT = """
-You are the Orchestrator for Beaver's Choice Paper Company.  
-Your job is to process each customer request using four delegation tools:
+You are the Orchestrator for Beaver's Choice Paper Company.
+Your job is to process each customer request by delegating tasks to four tools:
 
 - ask_inventory_agent
 - ask_quoting_agent
 - ask_ordering_agent
 - ask_finance_agent
 
-IMPORTANT:  
-You must NEVER call worker tools directly (e.g., check_inventory, generate_quote, finalize_sale).  
-You must ONLY call the delegation tools above.  
-Each tool MUST be called with ONE argument only:
-
-{
-  "payload": {
-      ... all fields go here ...
-  }
-}
-
-Never pass multiple top-level arguments.  
-Never pass arguments outside "payload".  
-Never invent fields.
+IMPORTANT RULES:
+- NEVER call worker tools directly (e.g., check_inventory, generate_quote, finalize_sale).
+- ONLY call the delegation tools listed above.
+- EVERY tool call MUST use EXACTLY ONE argument:
+    {
+      "payload": { ... }
+    }
+- NEVER place arguments outside "payload".
+- NEVER invent fields.
+- NEVER output plain text.
+- ALWAYS output a single valid JSON object as the final answer.
 
 ────────────────────────────────────────────
 WORKFLOW
 ────────────────────────────────────────────
 
-STEP 1 — Parse the customer request. Extract:
+STEP 1 — Parse the customer request.
+Extract:
 - items_requested: dict {item_name: quantity}
-- order_size: small (<100), medium (100–999), large (1000+)
+- order_size: "small", "medium", "large", or "extra_large"
 - event_type
 - request_date (YYYY-MM-DD)
 - delivery_deadline (optional)
 
-STEP 2 — Check inventory  
+STEP 2 — Check inventory.
 Call ask_inventory_agent with:
-
 {
   "payload": {
-      "item_names": list of item names,
-      "as_of_date": request_date
+    "item_names": list of item names,
+    "as_of_date": request_date
   }
 }
 
-STEP 3 — Generate quote  
+STEP 3 — Generate quote.
 Call ask_quoting_agent with:
-
 {
   "payload": {
-      "order_size": order_size,
-      "as_of_date": request_date,
-      "items_requested": items_requested,
-      "event_type": event_type
+    "order_size": order_size,
+    "as_of_date": request_date,
+    "items_requested": items_requested,
+    "event_type": event_type
   }
 }
 
-STEP 4 — Finalize sale if ANY items can be fulfilled  
-If the quote indicates ANY in-stock items:
-
+STEP 4 — Finalize sale if ANY items can be fulfilled.
+If the quote indicates any items can be sold:
 Call ask_ordering_agent with:
-
 {
   "payload": {
-      "items_sold": items_in_stock,
-      "total_amount": quote.total_amount,
-      "order_date": request_date
+    "items_sold": items_sold,
+    "total_amount": total_amount,
+    "order_date": request_date
   }
 }
 
-STEP 5 — Reorder missing items  
-For any out-of-stock items:
-
+STEP 5 — Reorder missing items.
+If any items are out of stock:
 Call ask_inventory_agent with:
-
 {
   "payload": {
-      "reorder_items": missing_items,
-      "as_of_date": request_date
+    "item_names": missing_items,
+    "as_of_date": request_date
   }
 }
 
-STEP 6 — Delivery feasibility  
+STEP 6 — Delivery feasibility (optional).
 If delivery_deadline exists:
-
 Call ask_ordering_agent with:
-
 {
   "payload": {
-      "check_delivery": true,
-      "quantity": total_units_requested,
-      "required_by_date": delivery_deadline,
-      "request_date": request_date
+    "quantity": total_units_requested,
+    "required_by_date": delivery_deadline,
+    "requested_date": request_date
   }
 }
 
-STEP 7 — Return final JSON response  
-Always return a JSON object:
+STEP 7 — Final JSON response.
+Return ONLY a JSON object with the following structure:
 
 {
   "fulfilled": true/false,
@@ -1160,17 +1141,10 @@ Always return a JSON object:
 }
 
 ────────────────────────────────────────────
-RULES
+ERROR HANDLING
 ────────────────────────────────────────────
 
-- ALWAYS finalize a sale if ANY items are in stock.
-- ALWAYS wrap tool arguments inside "payload".
-- NEVER call worker tools directly.
-- NEVER output raw tool errors or stack traces.
-- NEVER output plain text.
-- ALWAYS output valid JSON.
-
-If ANY tool call fails, return:
+If ANY tool call fails, or if you cannot complete the workflow, return:
 
 {
   "fulfilled": false,
@@ -1180,6 +1154,7 @@ If ANY tool call fails, return:
   "delivery_estimate": null,
   "customer_message": "We encountered a technical issue processing your request."
 }
+
 """
 
 
@@ -1215,6 +1190,42 @@ def summarize_results(results: list[dict]) -> None:
     if len(unfulfilled_df) > 0:
         print("\nSample unfulfilled requests:")
         print(unfulfilled_df[["request_id", "unfulfilled_reason"]].head())
+
+def parse_orchestrator_response(response: str) -> Dict:
+    # Try direct JSON
+    try:
+        data = json.loads(response)
+        return data.get("payload", data)
+    except Exception:
+        pass
+
+    # Try fenced JSON
+    match = re.search(r"```json(.*?)```", response, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(1).strip())
+            return data.get("payload", data)
+        except Exception:
+            pass
+
+    # Try repairing single quotes
+    try:
+        repaired = response.replace("'", '"')
+        data = json.loads(repaired)
+        return data.get("payload", data)
+    except Exception:
+        pass
+
+    # Final fallback
+    return {
+        "fulfilled": False,
+        "total_amount": 0.0,
+        "items_sold": {},
+        "unfulfilled_items": {},
+        "delivery_estimate": None,
+        "reason": "Invalid JSON returned by orchestrator.",
+        "customer_message": "We encountered a technical issue while processing your request."
+    }
 
 def run_test_scenarios():
     
@@ -1274,70 +1285,7 @@ def run_test_scenarios():
 
         # response = call_your_multi_agent_system(request_with_date)
         
-        try:
-            response_data = json.loads(response)
-        except Exception:
-            print("Invalid JSON from orchestrator:", response)
-
-            # Try to extract JSON from a fenced block
-            match = re.search(r"```json(.*?)```", response, re.DOTALL)
-            if match:
-                try:
-                    response_data = json.loads(match.group(1).strip())
-                except Exception:
-                    pass
-
-            # Try repairing single quotes → double quotes
-            if "response_data" not in locals():
-                try:
-                    repaired = response.replace("'", '"')
-                    response_data = json.loads(repaired)
-                except Exception:
-                    pass
-
-            # Final fallback
-            if "response_data" not in locals():
-                response_data = {
-                    "fulfilled": False,
-                    "total_amount": 0.0,
-                    "items_sold": {},
-                    "reason": "Invalid JSON returned by orchestrator.",
-                    "customer_message": "We encountered a technical issue while processing your request."
-                }
-            
-        """ 
-        try:
-        response_data = json.loads(response)
-        except Exception:
-            print("Invalid JSON from orchestrator:", response)
-
-            match = re.search(r"```json(.*?)```", response, re.DOTALL)
-            if match:
-                try:
-                    response_data = json.loads(match.group(1).strip())
-                except Exception:
-                    pass
-
-            if "response_data" not in locals():
-                try:
-                    repaired = response.replace("'", '"')
-                    response_data = json.loads(repaired)
-                except Exception:
-                    pass
-
-            if "response_data" not in locals():
-                response_data = {
-                    "fulfilled": False,
-                    "total_amount": 0.0,
-                    "items_sold": {},
-                    "reason": "Invalid JSON returned by orchestrator.",
-                    "customer_message": "We encountered a technical issue while processing your request."
-                }
-
-        if isinstance(response_data, dict) and "payload" in response_data:
-            response_data = response_data["payload"]
-         """
-
+        response_data = parse_orchestrator_response(response)
             
         fulfilled = response_data.get("fulfilled", False)
         total_amount = response_data.get("total_amount", 0.0)
@@ -1383,12 +1331,37 @@ def run_test_scenarios():
 
     summarize_results(results)
 
-    # Final report
-    final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")
-    final_report = generate_financial_report(final_date)
-    print("\n===== FINAL FINANCIAL REPORT =====")
-    print(f"Final Cash: ${final_report['cash_balance']:.2f}")
-    print(f"Final Inventory: ${final_report['inventory_value']:.2f}")
+    print("\n==================== ORDER SUMMARY ====================")
+    print(f"Request Date:        {request_date}")
+    print(f"Fulfilled:           {fulfilled}")
+    print(f"Total Amount:        ${total_amount:.2f}")
+    print(f"Reason:              {reason or 'N/A'}")
+
+    if items_sold:
+        print("\nItems Sold:")
+        for item, qty in items_sold.items():
+            stock_after = get_stock_level(item, request_date)["current_stock"].iloc[0]
+            print(f"  - {item}: {qty} units (remaining stock: {stock_after})")
+    else:
+        print("\nItems Sold:          None")
+
+    if order_response:
+        print("\nOrder Recorded:")
+        print(f"  {order_response}")
+
+    print("\n==================== FINANCIALS =======================")
+    print(f"Cash Balance:        ${current_cash:,.2f}")
+    print(f"Inventory Value:     ${current_inventory:,.2f}")
+    print(f"Total Assets:        ${report['total_assets']:,.2f}")
+
+    print("\nTop Selling Products:")
+    if report["top_selling_products"]:
+        for row in report["top_selling_products"]:
+            print(f"  - {row['item_name']}: {row['total_units']} units, ${row['total_revenue']:.2f}")
+    else:
+        print("  No sales yet.")
+
+    print("========================================================\n")
 
     # Save results
     pd.DataFrame(results).to_csv("test_results.csv", index=False)
