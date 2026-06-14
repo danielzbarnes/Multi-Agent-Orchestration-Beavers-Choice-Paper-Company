@@ -805,19 +805,21 @@ def generate_financial_report_tool(as_of_date: str) -> Dict:
 
 
 def insert_transaction(transaction_type: str, item_name: str, units: int, price: float, transaction_date: str):
-    db_engine.execute(
-        """
-        INSERT INTO transactions (transaction_type, item_name, units, price, transaction_date)
-        VALUES (:t, :i, :u, :p, :d)
-        """,
-        {
-            "t": transaction_type,
-            "i": item_name,
-            "u": units,
-            "p": price,
-            "d": transaction_date
-        }
-    )
+    with db_engine.connect() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO transactions (transaction_type, item_name, units, price, transaction_date)
+                VALUES (:t, :i, :u, :p, :d)
+            """),
+            {
+                "t": transaction_type,
+                "i": item_name,
+                "u": units,
+                "p": price,
+                "d": transaction_date
+            }
+        )
+        conn.commit()
 
 
 @tool
@@ -853,10 +855,12 @@ def place_order(payload: Dict) -> Dict:
         )
 
         # Reduce inventory
-        db_engine.execute(
-            "UPDATE inventory SET current_stock = current_stock - :q WHERE item_name = :i",
-            {"q": quantity, "i": item}
-        )
+        with db_engine.connect() as conn:
+            conn.execute(
+                text("UPDATE inventory SET current_stock = current_stock - :q WHERE item_name = :i"),
+                {"q": quantity, "i": item}
+            )
+            conn.commit()
 
     return {"status": "success", "total_amount": total_amount}
 
@@ -953,10 +957,12 @@ def finalize_sale(payload: Dict) -> Dict:
             transaction_date=order_date
         )
 
-        db_engine.execute(
-            "UPDATE inventory SET current_stock = current_stock - :q WHERE item_name = :i",
-            {"q": quantity, "i": item}
-        )
+        with db_engine.connect() as conn:
+            conn.execute(
+                text("UPDATE inventory SET current_stock = current_stock - :q WHERE item_name = :i"),
+                {"q": quantity, "i": item}
+            )
+            conn.commit()
 
     return {
         "fulfilled": True,
@@ -1045,24 +1051,29 @@ orchestrator = ToolCallingAgent(
 
 ORCHESTRATOR_SYSTEM_PROMPT = """
 You are the Orchestrator for Beaver's Choice Paper Company.
-Your job is to process each customer request by delegating tasks to four tools:
+
+You MUST call tools to complete tasks.  
+You MUST follow this exact tool call format:
+
+<tool_name>(
+    payload={
+        ... arguments here ...
+    }
+)
+
+NEVER call worker tools directly.  
+ONLY call these delegation tools:
 
 - ask_inventory_agent
 - ask_quoting_agent
 - ask_ordering_agent
 - ask_finance_agent
 
-IMPORTANT RULES:
-- NEVER call worker tools directly (e.g., check_inventory, generate_quote, finalize_sale).
-- ONLY call the delegation tools listed above.
-- EVERY tool call MUST use EXACTLY ONE argument:
-    {
-      "payload": { ... }
-    }
-- NEVER place arguments outside "payload".
-- NEVER invent fields.
-- NEVER output plain text.
-- ALWAYS output a single valid JSON object as the final answer.
+Each tool takes ONE argument named "payload".  
+NEVER place arguments outside "payload".  
+NEVER invent fields.  
+NEVER output plain text.  
+Your FINAL output must be a single valid JSON object.
 
 ────────────────────────────────────────────
 WORKFLOW
@@ -1071,65 +1082,73 @@ WORKFLOW
 STEP 1 — Parse the customer request.
 Extract:
 - items_requested: dict {item_name: quantity}
-- order_size: "small", "medium", "large", or "extra_large"
+- order_size: "small", "medium", "large", "extra_large"
 - event_type
 - request_date (YYYY-MM-DD)
 - delivery_deadline (optional)
 
 STEP 2 — Check inventory.
-Call ask_inventory_agent with:
-{
-  "payload": {
-    "item_names": list of item names,
-    "as_of_date": request_date
-  }
-}
+Call:
+
+ask_inventory_agent(
+    payload={
+        "item_names": list(items_requested.keys()),
+        "as_of_date": request_date
+    }
+)
 
 STEP 3 — Generate quote.
-Call ask_quoting_agent with:
-{
-  "payload": {
-    "order_size": order_size,
-    "as_of_date": request_date,
-    "items_requested": items_requested,
-    "event_type": event_type
-  }
-}
+Call:
 
-STEP 4 — Finalize sale if ANY items can be fulfilled.
-If the quote indicates any items can be sold:
-Call ask_ordering_agent with:
-{
-  "payload": {
-    "items_sold": items_sold,
-    "total_amount": total_amount,
-    "order_date": request_date
-  }
-}
+ask_quoting_agent(
+    payload={
+        "order_size": order_size,
+        "as_of_date": request_date,
+        "items_requested": items_requested,
+        "event_type": event_type
+    }
+)
 
-STEP 5 — Reorder missing items.
-If any items are out of stock:
-Call ask_inventory_agent with:
-{
-  "payload": {
-    "item_names": missing_items,
-    "as_of_date": request_date
-  }
-}
+STEP 4 — All-or-nothing fulfillment logic.
+If ANY item is missing or cannot be fulfilled:
+    DO NOT finalize a sale.
+    DO NOT call ask_ordering_agent.
+    Return a BUSINESS FAILURE JSON:
 
-STEP 6 — Delivery feasibility (optional).
+    {
+      "fulfilled": false,
+      "total_amount": 0.0,
+      "items_sold": {},
+      "unfulfilled_items": missing_items,
+      "delivery_estimate": null,
+      "customer_message": "Some items are out of stock and the order cannot be fulfilled."
+    }
+
+If ALL items can be fulfilled:
+    Call:
+
+    ask_ordering_agent(
+        payload={
+            "items_sold": items_requested,
+            "total_amount": quote.total_amount,
+            "order_date": request_date
+        }
+    )
+
+STEP 5 — Delivery feasibility (optional).
 If delivery_deadline exists:
-Call ask_ordering_agent with:
-{
-  "payload": {
-    "quantity": total_units_requested,
-    "required_by_date": delivery_deadline,
-    "requested_date": request_date
-  }
-}
+    Call:
 
-STEP 7 — Final JSON response.
-Return ONLY a JSON object with the following structure:
+    ask_ordering_agent(
+        payload={
+            "quantity": sum(items_requested.values()),
+            "required_by_date": delivery_deadline,
+            "requested_date": request_date
+        }
+    )
+
+STEP 6 — Final JSON response.
+Return ONLY:
 
 {
   "fulfilled": true/false,
@@ -1144,7 +1163,12 @@ Return ONLY a JSON object with the following structure:
 ERROR HANDLING
 ────────────────────────────────────────────
 
-If ANY tool call fails, or if you cannot complete the workflow, return:
+A TECHNICAL ERROR is when:
+- a tool call fails,
+- a tool returns invalid JSON,
+- or the workflow cannot continue.
+
+In that case return:
 
 {
   "fulfilled": false,
@@ -1292,6 +1316,8 @@ def run_test_scenarios():
         items_sold = response_data.get("items_sold", {})
         reason = response_data.get("reason", "")
         
+        order_response = None
+
         if fulfilled and items_sold and total_amount > 0:
             order_response = place_order({
                 "payload": {
@@ -1301,8 +1327,9 @@ def run_test_scenarios():
                 }
             })
             print(f"Order Response: {order_response}")
-            
-            
+
+        if order_response is not None:
+            print("Order Recorded")
 
         # Update state
         report = generate_financial_report_tool(request_date)
