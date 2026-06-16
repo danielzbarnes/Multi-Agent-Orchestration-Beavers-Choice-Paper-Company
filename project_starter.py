@@ -978,28 +978,28 @@ inventory_agent = ToolCallingAgent(
     name="InventoryAgent",
     model=model,
     tools=[check_inventory, reorder_inventory, get_inventory_snapshot],
-    description="Agent responsible for managing inventory levels, checking stock, and placing orders to suppliers."
+    description="Agent responsible for managing inventory levels, checking stock, and placing orders to suppliers. Return ONLY valid JSON. No explanations. No text."
 )
 
 quoting_agent = ToolCallingAgent(
     name="QuotingAgent",
     model=model,
     tools=[generate_quote, search_quote_history_tool],
-    description="Agent responsible for generating pricing quotes for customer orders, checking inventory, applying discounts, and searching historical quotes for reference."
+    description="Agent responsible for generating pricing quotes for customer orders, checking inventory, applying discounts, and searching historical quotes for reference. Return ONLY valid JSON. No explanations. No text."
 )
 
 finance_agent = ToolCallingAgent(
     name="FinanceAgent",
     model=model,
     tools=[get_cash_balance_tool, generate_financial_report_tool, get_financial_snapshot],
-    description="Agent responsible for monitoring the company's financial health, including cash balance and inventory valuation, and generating comprehensive financial reports."
+    description="Agent responsible for monitoring the company's financial health, including cash balance and inventory valuation, and generating comprehensive financial reports. Return ONLY valid JSON. No explanations. No text."
 )
 
 ordering_agent = ToolCallingAgent(
     name="OrderingAgent",
     model=model,
     tools=[place_order, get_sales_report, finalize_sale, check_delivery_feasibility, get_cash_balance_tool],
-    description="Agent responsible for processing customer orders, recording sales transactions, and generating sales reports."
+    description="Agent responsible for processing customer orders, recording sales transactions, and generating sales reports. Return ONLY valid JSON. No explanations. No text."
 )
 
 
@@ -1008,25 +1008,31 @@ def ask_inventory_agent(payload: Dict) -> str:
     """Send a payload to the InventoryAgent.
     
     Args:
-        payload (str): The payload or inquiry to be sent to the InventoryAgent.
+        payload (Dict): The payload or inquiry to be sent to the InventoryAgent.
     """
-    return str(inventory_agent.run(json.dumps(payload)))
+    response = inventory_agent.run(
+        json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
+    )
+    return json.loads(response)
 
 @tool
 def ask_quoting_agent(payload: Dict) -> str:
     """Send a payload to the QuotingAgent.
 
     Args:
-        payload (str): The payload or inquiry to be sent to the QuotingAgent.
+        payload (Dict): The payload or inquiry to be sent to the QuotingAgent.
     """
-    return str(quoting_agent.run(json.dumps(payload)))
+    response = quoting_agent.run(
+        json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
+    )
+    return json.loads(response)
 
 @tool
 def ask_ordering_agent(payload: Dict) -> str:
     """Send a payload to the OrderingAgent.
     
     Args:
-        payload (str): The payload or inquiry to be sent to the OrderingAgent.
+        payload (Dict): The payload or inquiry to be sent to the OrderingAgent.
     """
 
     return str(ordering_agent.run(json.dumps(payload)))
@@ -1036,10 +1042,13 @@ def ask_finance_agent(payload: Dict) -> str:
     """Send a payload to the FinanceAgent.
     
     Args:
-        payload (str): The payload or inquiry to be sent to the FinanceAgent.
+        payload (Dict): The payload or inquiry to be sent to the FinanceAgent.
     """
 
-    return str(finance_agent.run(json.dumps(payload)))
+    response = ordering_agent.run(
+        json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
+    )
+    return json.loads(response)
 
 
 orchestrator = ToolCallingAgent(
@@ -1053,36 +1062,33 @@ ORCHESTRATOR_SYSTEM_PROMPT = """
 You are the Orchestrator for Beaver's Choice Paper Company.
 
 You MUST call tools to complete tasks.  
-You MUST follow this exact tool call format:
+You MUST use THIS EXACT FORMAT for tool calls:
 
-<tool_name>(
-    payload={
-        ... arguments here ...
-    }
-)
+{
+  "tool": "<tool_name>",
+  "payload": { ... }
+}
 
-NEVER call worker tools directly.  
-ONLY call these delegation tools:
+NEVER use parentheses.  
+NEVER use function-call syntax.  
+NEVER output plain text before the final JSON.  
+ONLY call these tools:
 
 - ask_inventory_agent
 - ask_quoting_agent
 - ask_ordering_agent
 - ask_finance_agent
 
-Each tool takes ONE argument named "payload".  
-NEVER place arguments outside "payload".  
-NEVER invent fields.  
-NEVER output plain text.  
 Your FINAL output must be a single valid JSON object.
 
 ────────────────────────────────────────────
-WORKFLOW
+WORKFLOW (ALL-OR-NOTHING FULFILLMENT)
 ────────────────────────────────────────────
 
 STEP 1 — Parse the customer request.
 Extract:
-- items_requested: dict {item_name: quantity}
-- order_size: "small", "medium", "large", "extra_large"
+- items_requested: dict
+- order_size
 - event_type
 - request_date (YYYY-MM-DD)
 - delivery_deadline (optional)
@@ -1090,62 +1096,64 @@ Extract:
 STEP 2 — Check inventory.
 Call:
 
-ask_inventory_agent(
-    payload={
-        "item_names": list(items_requested.keys()),
-        "as_of_date": request_date
-    }
-)
+{
+  "tool": "ask_inventory_agent",
+  "payload": {
+    "item_names": list(items_requested.keys()),
+    "as_of_date": request_date
+  }
+}
 
 STEP 3 — Generate quote.
 Call:
 
-ask_quoting_agent(
-    payload={
-        "order_size": order_size,
-        "as_of_date": request_date,
-        "items_requested": items_requested,
-        "event_type": event_type
-    }
-)
+{
+  "tool": "ask_quoting_agent",
+  "payload": {
+    "order_size": order_size,
+    "as_of_date": request_date,
+    "items_requested": items_requested,
+    "event_type": event_type
+  }
+}
 
-STEP 4 — All-or-nothing fulfillment logic.
-If ANY item is missing or cannot be fulfilled:
-    DO NOT finalize a sale.
-    DO NOT call ask_ordering_agent.
-    Return a BUSINESS FAILURE JSON:
+STEP 4 — All-or-nothing fulfillment.
+If ANY item is missing:
+RETURN THIS JSON (DO NOT CALL ANY MORE TOOLS):
 
-    {
-      "fulfilled": false,
-      "total_amount": 0.0,
-      "items_sold": {},
-      "unfulfilled_items": missing_items,
-      "delivery_estimate": null,
-      "customer_message": "Some items are out of stock and the order cannot be fulfilled."
-    }
+{
+  "fulfilled": false,
+  "total_amount": 0.0,
+  "items_sold": {},
+  "unfulfilled_items": missing_items,
+  "delivery_estimate": null,
+  "customer_message": "Some items are out of stock and the order cannot be fulfilled."
+}
 
 If ALL items can be fulfilled:
-    Call:
+Call:
 
-    ask_ordering_agent(
-        payload={
-            "items_sold": items_requested,
-            "total_amount": quote.total_amount,
-            "order_date": request_date
-        }
-    )
+{
+  "tool": "ask_ordering_agent",
+  "payload": {
+    "items_sold": items_requested,
+    "total_amount": quote.total_amount,
+    "order_date": request_date
+  }
+}
 
 STEP 5 — Delivery feasibility (optional).
 If delivery_deadline exists:
-    Call:
+Call:
 
-    ask_ordering_agent(
-        payload={
-            "quantity": sum(items_requested.values()),
-            "required_by_date": delivery_deadline,
-            "requested_date": request_date
-        }
-    )
+{
+  "tool": "ask_ordering_agent",
+  "payload": {
+    "quantity": sum(items_requested.values()),
+    "required_by_date": delivery_deadline,
+    "requested_date": request_date
+  }
+}
 
 STEP 6 — Final JSON response.
 Return ONLY:
@@ -1163,12 +1171,8 @@ Return ONLY:
 ERROR HANDLING
 ────────────────────────────────────────────
 
-A TECHNICAL ERROR is when:
-- a tool call fails,
-- a tool returns invalid JSON,
-- or the workflow cannot continue.
-
-In that case return:
+If a tool call fails or you cannot continue:
+RETURN ONLY THIS JSON:
 
 {
   "fulfilled": false,
@@ -1178,7 +1182,6 @@ In that case return:
   "delivery_estimate": null,
   "customer_message": "We encountered a technical issue processing your request."
 }
-
 """
 
 
