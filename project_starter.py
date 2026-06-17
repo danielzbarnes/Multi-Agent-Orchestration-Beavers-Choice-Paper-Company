@@ -978,28 +978,36 @@ inventory_agent = ToolCallingAgent(
     name="InventoryAgent",
     model=model,
     tools=[check_inventory, reorder_inventory, get_inventory_snapshot],
-    description="Agent responsible for managing inventory levels, checking stock, and placing orders to suppliers. Return ONLY valid JSON. No explanations. No text."
+    description="Return ONLY valid JSON. No text. No explanation."
 )
 
 quoting_agent = ToolCallingAgent(
     name="QuotingAgent",
     model=model,
     tools=[generate_quote, search_quote_history_tool],
-    description="Agent responsible for generating pricing quotes for customer orders, checking inventory, applying discounts, and searching historical quotes for reference. Return ONLY valid JSON. No explanations. No text."
+    description=(
+        "You are a strict JSON‑only agent. "
+        "When a payload is sent to you, you MUST call the appropriate tool. "
+        "Your final output MUST be ONLY valid JSON. "
+        "No text. No explanations. No markdown. No commentary. "
+        "No 'Observations'. No natural language. "
+        "Return exactly the JSON returned by the tool. "
+        "Do NOT add fields. Do NOT wrap it. Do NOT explain it."
+    )
 )
 
 finance_agent = ToolCallingAgent(
     name="FinanceAgent",
     model=model,
     tools=[get_cash_balance_tool, generate_financial_report_tool, get_financial_snapshot],
-    description="Agent responsible for monitoring the company's financial health, including cash balance and inventory valuation, and generating comprehensive financial reports. Return ONLY valid JSON. No explanations. No text."
+    description="Return ONLY valid JSON. No text. No explanation."
 )
 
 ordering_agent = ToolCallingAgent(
     name="OrderingAgent",
     model=model,
     tools=[place_order, get_sales_report, finalize_sale, check_delivery_feasibility, get_cash_balance_tool],
-    description="Agent responsible for processing customer orders, recording sales transactions, and generating sales reports. Return ONLY valid JSON. No explanations. No text."
+    description="Return ONLY valid JSON. No text. No explanation."
 )
 
 
@@ -1035,7 +1043,10 @@ def ask_ordering_agent(payload: Dict) -> str:
         payload (Dict): The payload or inquiry to be sent to the OrderingAgent.
     """
 
-    return str(ordering_agent.run(json.dumps(payload)))
+    response = ordering_agent.run(
+        json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
+    )
+    return json.loads(response)
 
 @tool
 def ask_finance_agent(payload: Dict) -> str:
@@ -1045,7 +1056,7 @@ def ask_finance_agent(payload: Dict) -> str:
         payload (Dict): The payload or inquiry to be sent to the FinanceAgent.
     """
 
-    response = ordering_agent.run(
+    response = finance_agent.run(
         json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
     )
     return json.loads(response)
