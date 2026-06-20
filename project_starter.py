@@ -6,10 +6,13 @@ import dotenv
 import ast
 import json
 import re
+import csv
+from dotenv import load_dotenv
 from sqlalchemy.sql import text
 from datetime import datetime, timedelta
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Any, Optional
 from sqlalchemy import create_engine, Engine
+from smolagents import ToolCallingAgent, OpenAIServerModel, tool
 
 # Create an SQLite database
 db_engine = create_engine("sqlite:///munder_difflin.db")
@@ -590,685 +593,696 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 ########################
 ########################
 
+load_dotenv()
 
-from smolagents import ToolCallingAgent, OpenAIServerModel, tool
-
-# Set up and load your env parameters and instantiate your model.
-
-dotenv.load_dotenv()
-
+MODEL_ID = "gpt-4o-mini"
 API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = os.getenv("BASE_URL")
 
-model = OpenAIServerModel(model_id="gpt-4o-mini", api_key=API_KEY, api_base=BASE_URL)
 
-
-"""Set up tools for your agents to use, these should be methods that combine the database functions above
- and apply criteria to them to ensure that the flow of the system is correct."""
-
-
-# Tools for inventory agent
+# -----------------------
+# FINANCE TOOLS
+# -----------------------
 
 @tool
-def check_inventory(item_names: list[str], as_of_date: str) -> Dict:
+def get_cash_balance_tool(as_of_date: str) -> float:
     """
-    Return stock levels for the given items as of a date.
-    
+    Return the cash balance as of a given date.
+
     Args:
-        item_names (list[str]): A list of item names to check inventory for.
-        as_of_date (str): The date (in ISO format) to check inventory levels as of.
+        as_of_date (str): ISO date string (YYYY-MM-DD) representing the cutoff date.
 
+    Returns:
+        float: Cash balance as of the given date.
     """
-
-    results = {}
-    inventory = get_all_inventory(as_of_date)
-    for item in item_names:
-        results[item] = inventory.get(item, 0)
-    return results
+    
+    return get_cash_balance(as_of_date)
 
 @tool
-def reorder_inventory(item_name: str, quantity: int, order_date: str) -> str:
-    """Place a stock reorder for an item and return the estimated delivery date.
-    
-    Args:
-        item_name (str): The name of the item to reorder.
-        quantity (int): The number of units to order.
-        order_date (str): The date (in ISO format) when the order is placed.
+def generate_financial_report_tool(as_of_date: str) -> dict:
     """
+    Generate a full financial report as of a given date.
 
-    # Fetch unit price from inventory
-    inventory_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :item_name", db_engine, params={"item_name": item_name})
+    Args:
+        as_of_date (str): ISO date string (YYYY-MM-DD).
+
+    Returns:
+        dict: Financial report including cash, inventory value, and assets.
+    """
     
-    if inventory_df.empty:
-        return f"Error: Item '{item_name}' not found in inventory."
+    return generate_financial_report(as_of_date)
 
-    unit_price = inventory_df.iloc[0]["unit_price"]
-    total_cost = unit_price * quantity
+# -----------------------
+# INVENTORY TOOLS
+# -----------------------
 
-    # Create stock order transaction
+@tool
+def get_inventory_snapshot_tool(as_of_date: str) -> dict:
+    """
+    Return inventory snapshot as of a given date.
+
+    Args:
+        as_of_date (str): ISO date string (YYYY-MM-DD).
+
+    Returns:
+        dict: Mapping of item_name → stock.
+    """
+    
+    return get_all_inventory(as_of_date)
+
+@tool
+def get_stock_level_tool(item_name: str, as_of_date: str) -> dict:
+    """
+    Return stock level for a specific item.
+
+    Args:
+        item_name (str): Name of the item.
+        as_of_date (str): ISO date string (YYYY-MM-DD).
+
+    Returns:
+        dict: { "item_name": str, "current_stock": int }
+    """
+    
+    df = get_stock_level(item_name, as_of_date)
+    return {"item_name": item_name, "current_stock": int(df["current_stock"].iloc[0])}
+
+@tool
+def reorder_inventory_tool(item_name: str, quantity: int, order_date: str) -> dict:
+    """
+    Compute supplier delivery date and return reorder info.
+
+    Args:
+        item_name (str): Name of the item to reorder.
+        quantity (int): Number of units to order.
+        order_date (str): ISO date string (YYYY-MM-DD).
+
+    Returns:
+        dict: { item_name, quantity, delivery_date }
+    """
+    
+    delivery = get_supplier_delivery_date(order_date, quantity)
+    return {
+        "item_name": item_name,
+        "quantity": quantity,
+        "delivery_date": delivery,
+    }
+
+# -----------------------
+# QUOTING TOOLS
+# -----------------------
+
+@tool
+def search_quote_history_tool(search_terms: list, limit: int = 5) -> list:
+    """
+    Search historical quotes for matching terms.
+
+    Args:
+        search_terms (list): Keywords to search for.
+        limit (int): Max number of results.
+
+    Returns:
+        list: Matching quote records.
+    """
+    
+    return search_quote_history(search_terms, limit)
+
+@tool
+def generate_quote_tool(items: list, as_of_date: str, event_type: str) -> dict:
+    """
+    Generate a quote using inventory and pricing rules.
+
+    Args:
+        items (list): List of { item_name, quantity }.
+        as_of_date (str): ISO date string.
+        event_type (str): Event type (ceremony, parade, etc.).
+
+    Returns:
+        dict: Quote with totals and line items.
+    """
+    
+    inventory_df = pd.read_sql("SELECT * FROM inventory", db_engine)
+    snapshot = get_all_inventory(as_of_date)
+
+    margin = 0.30
+    total = 0
+    line_items = []
+
+    for item in items:
+        name = item["item_name"]
+        qty = item["quantity"]
+
+        row = inventory_df[inventory_df["item_name"].str.lower() == name.lower()]
+        unit_price = float(row["unit_price"].iloc[0]) if not row.empty else 0.10
+
+        base = unit_price * qty
+        line_total = base * (1 + margin)
+        total += line_total
+
+        line_items.append({
+            "item_name": name,
+            "requested_qty": qty,
+            "available_stock": snapshot.get(name, 0),
+            "unit_price": unit_price,
+            "line_total": round(line_total, 2),
+        })
+
+    return {
+        "total_amount": round(total, 2),
+        "line_items": line_items,
+        "quote_explanation": f"Margin {margin:.0%}, event={event_type}",
+    }
+
+
+# -----------------------
+# ORDERING TOOLS
+# -----------------------
+
+@tool
+def place_sales_order_tool(items_sold: list, total_price: float, order_date: str) -> dict:
+    """
+    Record a sales transaction.
+
+    Args:
+        items_sold (list): Line items sold.
+        total_price (float): Total sale amount.
+        order_date (str): ISO date string.
+
+    Returns:
+        dict: Status message.
+    """
+    
+    create_transaction(
+        item_name=None,
+        transaction_type="sales",
+        quantity=None,
+        price=total_price,
+        date=order_date,
+    )
+    return {"status": "sale_recorded"}
+
+@tool
+def place_stock_order_tool(item_name: str, quantity: int, unit_price: float, order_date: str) -> dict:
+    """
+    Record a stock order transaction.
+
+    Args:
+        item_name (str): Item to order.
+        quantity (int): Units to order.
+        unit_price (float): Price per unit.
+        order_date (str): ISO date string.
+
+    Returns:
+        dict: Stock order details.
+    """
+    
+    total_price = quantity * unit_price
     create_transaction(
         item_name=item_name,
         transaction_type="stock_orders",
         quantity=quantity,
-        price=total_cost,
-        date=order_date
+        price=total_price,
+        date=order_date,
     )
-
-    # Estimate delivery date
-    delivery_date = get_supplier_delivery_date(order_date, quantity)
-
-    return f"Order placed for {quantity} units of '{item_name}' at a total cost of ${total_cost:.2f}. Estimated delivery date: {delivery_date}."
-
-@tool
-def get_inventory_snapshot(as_of_date: str) -> Dict:
-    """Return inventory items, stock levels, and total inventory value.
-    
-    Args:
-        as_of_date (str): The date (in ISO format) to retrieve the inventory snapshot for.
-    """
-
-    inventory_df = pd.read_sql("SELECT * FROM inventory", db_engine)
-    snapshot = []
-    total_value = 0.0
-
-    for _, item in inventory_df.iterrows():
-        stock_info = get_stock_level(item["item_name"], as_of_date)
-        stock = stock_info["current_stock"]
-        item_value = stock * item["unit_price"]
-        total_value += item_value
-
-        snapshot.append({
-            "item_name": item["item_name"],
-            "stock": stock,
-            "unit_price": item["unit_price"],
-            "value": item_value,
-        })
-
     return {
-        "inventory": snapshot,
-        "total_inventory_value": total_value,
+        "status": "stock_ordered",
+        "item_name": item_name,
+        "quantity": quantity,
+        "total_price": total_price,
     }
+    
+# -----------------------
+# AGENTS
+# -----------------------
+
+SHARED_MODEL = OpenAIServerModel(
+    model_id=MODEL_ID,
+    api_key=API_KEY,
+    api_base=BASE_URL
+)
+
+class BaseWorkerAgent(ToolCallingAgent):
+    def __init__(self, tools, name, description):
+        super().__init__(
+            model=SHARED_MODEL,
+            tools=tools,
+            name=name,
+            description=description,        
+        )
+        
+        try:
+            self.final_answer_tool = None
+        except Exception:
+            pass
+        try:
+            self._final_answer_tool = None
+        except Exception:
+            pass
+        
+class FinanceAgent(BaseWorkerAgent):
+    def __init__(self):
+        super().__init__(
+            tools=[get_cash_balance_tool, generate_financial_report_tool],
+            name="finance_agent",
+            description="Handles cash balance, spending checks, and financial reports."
+        )
+
+class InventoryAgent(BaseWorkerAgent):
+    def __init__(self):
+        super().__init__(
+            tools=[
+                get_inventory_snapshot_tool,
+                get_stock_level_tool,
+                reorder_inventory_tool,
+            ],
+            name="inventory_agent",
+            description="Checks stock levels and handles reorders."
+        )
+
+class QuotingAgent(BaseWorkerAgent):
+    def __init__(self):
+        super().__init__(
+            tools=[
+                search_quote_history_tool,
+                generate_quote_tool,
+            ],
+            name="quoting_agent",
+            description="Generates quotes using inventory and historical data."
+        )
 
 
-# Tools for quoting agent
+class OrderingAgent(BaseWorkerAgent):
+    def __init__(self):
+        super().__init__(
+            tools=[
+                place_sales_order_tool,
+                place_stock_order_tool,
+            ],
+            name="ordering_agent",
+            description="Places sales orders and stock orders."
+        )
+        
+# -----------------------
+# ORCHESTRATOR
+# -----------------------
+class Orchestrator:
+    def __init__(self):
+        self.finance = FinanceAgent()
+        self.inventory = InventoryAgent()
+        self.quoting = QuotingAgent()
+        self.ordering = OrderingAgent()
 
-@tool
-def generate_quote(order_size: str, as_of_date: str, items_requested: Dict[str, int] = {}, event_type: str ="") -> Dict:
-    """Generate a price quote with bulk discounts and fulfillment status.
-    
-    Args:
-        order_size (str): The size category of the order (e.g., 'small', 'medium', 'large', 'extra_large').
-        as_of_date (str): The date (in ISO format) to calculate inventory and pricing as of.
-        items_requested (Dict[str, int], optional): A dictionary mapping item names to quantities requested. Default is an empty dict.
-        event_type (str, optional): The type of event for which the quote is being generated (e.g., 'wedding', 'corporate event'). Default is an empty string.
-    """
-    
-    discount_mapping = {
-        "small": 0.0,
-        "medium": 0.05,
-        "large": 0.10,
-        "extra_large": 0.15
-    }
-    discount_rate = discount_mapping.get(order_size.lower(), 0.0)
-    
-    inv_df = pd.read_sql("SELECT * FROM inventory", db_engine)
-    price_map = dict(zip(inv_df["item_name"], inv_df["unit_price"]))
-    all_inventory = get_all_inventory(as_of_date)
-    
-    missing_items = [
-        item for item, quantity in items_requested.items()
-        if all_inventory.get(item,0) < quantity
-    ]
-    
-    
-    if missing_items:
+    def run(self, structured_request: dict):
+        """
+        Main orchestrator entrypoint.
+        Calls worker agents in the correct order and returns a unified response.
+        """
+
+        as_of = structured_request["as_of_date"]
+        items = structured_request["items"]
+        event_type = structured_request.get("event_type")
+
+        # 1. Generate quote (agent call)
+        raw_quote = call_agent_tool_strict(
+            self.quoting,
+            f"Call generate_quote_tool with items={items}, as_of_date='{as_of}', event_type='{event_type}'."
+        )
+        quote = ensure_dict_from_agent_result(self.quoting, raw_quote)
+        """ 
+        raw_quote = self.quoting.run(
+            f"Use ONLY generate_quote_tool. Do NOT produce a natural-language final answer. "
+            f"Call generate_quote_tool with items={items}, as_of_date='{as_of}', event_type='{event_type}'."
+        )
+        quote = ensure_dict_from_agent_result(self.quoting, raw_quote)
+        """
+
+        # 2. Reorder missing items based on quote's available_stock
+        reorders = []
+        for line in quote.get("line_items", []):
+            # ensure numeric types
+            try:
+                available = int(line.get("available_stock", 0))
+            except Exception:
+                available = int(float(line.get("available_stock", 0) or 0))
+            try:
+                requested = int(line.get("requested_qty", 0))
+            except Exception:
+                requested = int(float(line.get("requested_qty", 0) or 0))
+
+            if available < requested:
+                missing = requested - available
+
+                raw_reorder = self.inventory.run(
+                    f"Use ONLY reorder_inventory_tool. Do NOT produce a natural-language final answer. "
+                    f"Call reorder_inventory_tool with item_name='{line['item_name']}', quantity={missing}, order_date='{as_of}'."
+                )
+                reorder_info = ensure_dict_from_agent_result(self.inventory, raw_reorder)
+
+                # place stock order (we don't need its return value here, but keep agent call)
+                self.ordering.run(
+                    f"Use ONLY place_stock_order_tool. Do NOT produce a natural-language final answer. "
+                    f"Call place_stock_order_tool with item_name='{line['item_name']}', quantity={missing}, unit_price={line['unit_price']}, order_date='{as_of}'."
+                )
+
+                reorders.append(reorder_info)
+
         return {
-            "can_fulfill": False,
-            "total_amount": 0.0,
-            "line_items": {},
-            "discount_rate": discount_rate,
-            "missing_items": missing_items
+            "quote": quote,
+            "reorders": reorders,
+            "delivery_date_requested": structured_request.get("delivery_date"),
         }
 
 
-    subtotal = sum(price_map[item] * qty for item, qty in items_requested.items())
-
-    total = round(subtotal * (1 - discount_rate), 2)
-
-    discount_msg = (
-        f"A {int(discount_rate * 100)}% bulk discount has been applied."
-        if discount_rate > 0 else
-        "No bulk discount applies for this order size."
-    )
-
-    return {
-        "fulfilled": True,
-        "total_amount": total,
-        "items_sold": items_requested,
-        "reason": "",
-        "customer_message": (
-            f"Your order can be fulfilled. {discount_msg} "
-            f"The total price is ${total:.2f}."
-        )
-    }
-    
-@tool
-def check_delivery_feasibility(quantity: int, required_by_date: str, requested_date: str) -> str:
-    """Check if delivery can be completed before a required date.
-    
-    Args:
-        quantity (int): The number of units in the order.
-        required_by_date (str): The date by which the order must be delivered, in ISO format (YYYY-MM-DD).
-        requested_date (str): The date on which the order is requested, in ISO format (YYYY-MM-DD).
+# -----------------------
+# HELPER FUNCTIONS
+# -----------------------
+def parse_order_like_string(s: str) -> Optional[Dict]:
     """
-
-    estimated_delivery_date = get_supplier_delivery_date(requested_date, quantity)
-    
-    if estimated_delivery_date <= required_by_date:
-        return f"Delivery is feasible. Estimated delivery date: {estimated_delivery_date}."
-    else:
-        return f"Delivery may not be feasible. Estimated delivery date: {estimated_delivery_date}, which is after the required by date of {required_by_date}."
-       
-@tool
-def search_quote_history_tool(search_terms: List[str], limit: int = 5) -> List[Dict[str, any]]:
-    """Search historical quotes matching given keywords.
-    
-    Args:
-        search_terms (List[str]): A list of keywords to search for in the quote history.
-        limit (int, optional): The maximum number of matching quotes to return. Default is 5.
+    Try to extract structured fields from common tool strings.
+    Returns dict or None.
+    Examples handled:
+      - "Order for 1000 units of matte A3 paper placed. Delivery date: 2025-04-11"
+      - "Order placed: 1000 matte A3 paper; delivery 2025-04-11"
+      - "Placed order: 50 x A4 glossy paper (delivery 2025-04-08)"
     """
+    if not isinstance(s, str):
+        return None
 
-    # Implementation is handled by the underlying function defined above.
-    return json.loads(json.dumps(search_quote_history(search_terms, limit), default=str))
+    # Normalize whitespace
+    text = " ".join(s.split())
 
-# Tools for ordering agent
+    # Pattern 1: "Order for 1000 units of NAME placed. Delivery date: YYYY-MM-DD"
+    m = re.search(r"Order\s+for\s+(\d+)\s+(?:units\s+of\s+)?(.+?)\s+placed[.\s].*?Delivery\s+date[:\s]+(\d{4}-\d{2}-\d{2})", text, flags=re.IGNORECASE)
+    if m:
+        return {"item_name": m.group(2).strip(), "quantity": int(m.group(1)), "delivery_date": m.group(3), "raw_text": s}
 
-@tool
-def get_cash_balance_tool(as_of_date: str) -> float:
-    """Return cash balance as of a given date.
+    # Pattern 2: "Order placed: 1000 matte A3 paper; delivery 2025-04-11"
+    m = re.search(r"Order\s+placed[:\s]+(\d+)\s+(.+?)[;,\s]+delivery[:\s]+(\d{4}-\d{2}-\d{2})", text, flags=re.IGNORECASE)
+    if m:
+        return {"item_name": m.group(2).strip(), "quantity": int(m.group(1)), "delivery_date": m.group(3), "raw_text": s}
 
-    Args:
-        as_of_date (str): The date (in ISO format) to calculate the cash balance as of.
+    # Pattern 3: "Placed order: 50 x A4 glossy paper (delivery 2025-04-08)"
+    m = re.search(r"(\d+)\s*[xX]\s*(.+?)\s*\(.*?(\d{4}-\d{2}-\d{2}).*?\)", text)
+    if m:
+        return {"item_name": m.group(2).strip(), "quantity": int(m.group(1)), "delivery_date": m.group(3), "raw_text": s}
+
+    # Pattern 4: "Delivery date: YYYY-MM-DD" and "qty" somewhere
+    m_qty = re.search(r"(\d+)\s+(?:units|qty|quantity)\b", text, flags=re.IGNORECASE)
+    m_date = re.search(r"(\d{4}-\d{2}-\d{2})", text)
+    if m_qty and m_date:
+        # best-effort item name: text between qty and 'delivery' or end
+        qty = int(m_qty.group(1))
+        # try to find a plausible item name (words around qty)
+        # fallback to raw_text if we can't
+        name_match = re.search(r"(?:for|of)\s+(.+?)(?:\s+placed|\s+delivery|\s+on|$)", text, flags=re.IGNORECASE)
+        item_name = name_match.group(1).strip() if name_match else None
+        return {"item_name": item_name or "unknown", "quantity": qty, "delivery_date": m_date.group(1), "raw_text": s}
+
+    return None
+
+
+def ensure_dict_from_agent_result(agent, result: Any) -> Dict:
     """
-
-    return get_cash_balance(as_of_date)
-
-@tool
-def generate_financial_report_tool(as_of_date: str) -> Dict:
-    """Return a financial report including cash and inventory value.
-
-    Args:
-        as_of_date (str): The date (in ISO format) to generate the financial report for.
+    Ensure we get a dict from an agent call.
+    - If result is dict -> return it.
+    - If result is str -> try ast.literal_eval, json.loads, then pattern parsing.
+    - If that fails -> try agent.memory.steps[-1].observations and repeat parsing.
+    - If still fails -> raise ValueError.
     """
-
-    return generate_financial_report(as_of_date)
-
-
-def insert_transaction(transaction_type: str, item_name: str, units: int, price: float, transaction_date: str):
-    with db_engine.connect() as conn:
-        conn.execute(
-            text("""
-                INSERT INTO transactions (transaction_type, item_name, units, price, transaction_date)
-                VALUES (:t, :i, :u, :p, :d)
-            """),
-            {
-                "t": transaction_type,
-                "i": item_name,
-                "u": units,
-                "p": price,
-                "d": transaction_date
-            }
-        )
-        conn.commit()
-
-
-@tool
-def place_order(payload: Dict) -> Dict:
-    """Record a sales transaction for the given items and total amount, and update inventory accordingly.
-    
-    Args:
-        payload (Dict): A dictionary containing the following keys:
-            - items_sold (Dict[str, int]): A dictionary mapping item names to quantities sold.
-            - total_amount (float): The total amount charged for the sale.
-            - order_date (str): The date of the sale in ISO format (YYYY-MM-DD).
-    """
-
-    items_sold = payload["items_sold"]
-    total_amount = payload["total_amount"]
-    order_date = payload["order_date"]
-
-    # Load unit prices
-    inv_df = pd.read_sql("SELECT item_name, unit_price FROM inventory", db_engine)
-    price_map = dict(zip(inv_df["item_name"], inv_df["unit_price"]))
-
-    # Record each item as a transaction
-    for item, quantity in items_sold.items():
-        unit_price = price_map.get(item, 0.0)
-        price = unit_price * quantity
-
-        insert_transaction(
-            transaction_type="sales",
-            item_name=item,
-            units=quantity,
-            price=price,
-            transaction_date=order_date
-        )
-
-        # Reduce inventory
-        with db_engine.connect() as conn:
-            conn.execute(
-                text("UPDATE inventory SET current_stock = current_stock - :q WHERE item_name = :i"),
-                {"q": quantity, "i": item}
-            )
-            conn.commit()
-
-    return {"status": "success", "total_amount": total_amount}
-
-@tool
-def get_sales_report(as_of_date: str) -> Dict:
-    """Return total revenue, transaction count, and items sold as of a date.
-
-    Args:
-        as_of_date (str): The date (in ISO format) to generate the sales report for.
-    """
-
-    sales_query = """
-        SELECT item_name, SUM(units) as total_units, SUM(price) as total_revenue
-        FROM transactions
-        WHERE transaction_type = 'sales' AND transaction_date <= :date
-        GROUP BY item_name
-    """
-    sales_data = pd.read_sql(sales_query, db_engine, params={"date": as_of_date})
-    
-    total_revenue = sales_data["total_revenue"].sum()
-    transaction_count = len(sales_data)
-    items_sold = dict(zip(sales_data["item_name"], sales_data["total_units"]))
-    
-    return {
-        "total_revenue": total_revenue,
-        "transaction_count": transaction_count,
-        "items_sold": items_sold,
-    }
-
-
-@tool
-def get_financial_snapshot(as_of_date: str) -> Dict:
-    """Return cash balance, inventory value, and total revenue as of a date.
-
-    Args:
-        as_of_date (str): The date for which to retrieve the financial snapshot, in ISO format (YYYY-MM-DD).
-    """
-
-    report = generate_financial_report(as_of_date)
-
-    revenue_query = """
-        SELECT SUM(price) AS total_revenue
-        FROM transactions
-        WHERE transaction_type = 'sales'
-          AND transaction_date <= :date
-    """
-    df = pd.read_sql(revenue_query, db_engine, params={"date": as_of_date})
-    total_revenue = float(df.iloc[0]["total_revenue"] or 0.0)
-
-    return {
-        "cash_balance": report["cash_balance"],
-        "inventory_value": report["inventory_value"],
-        "total_revenue": report.get("total_revenue", 0.0)
-    }
-
-@tool
-def get_inventory_value(as_of_date: str) -> float:
-    """Return total inventory valuation as of a date.
-    
-    Args:
-        as_of_date (str): The date for which to retrieve the inventory valuation, in ISO format (YYYY-MM-DD).
-    """
-
-    report = generate_financial_report(as_of_date)
-    return report["inventory_value"]
-
-@tool
-def finalize_sale(payload: Dict) -> Dict:
-    """Record a finalized sale transaction for the given items and update inventory accordingly.
-    
-    Args:
-        payload (Dict): A dictionary containing the following keys:
-            - items_sold (Dict[str, int]): A dictionary mapping item names to quantities sold.
-            - total_amount (float): The total amount charged for the sale.
-            - order_date (str): The date of the sale in ISO format (YYYY-MM-DD).
-    """
-    items_sold = payload["items_sold"]
-    total_amount = payload["total_amount"]
-    order_date = payload["order_date"]
-
-    # Load unit prices
-    inv_df = pd.read_sql("SELECT item_name, unit_price FROM inventory", db_engine)
-    price_map = dict(zip(inv_df["item_name"], inv_df["unit_price"]))
-
-    for item, quantity in items_sold.items():
-        unit_price = price_map.get(item, 0.0)
-        price = unit_price * quantity
-
-        insert_transaction(
-            transaction_type="sales",
-            item_name=item,
-            units=quantity,
-            price=price,
-            transaction_date=order_date
-        )
-
-        with db_engine.connect() as conn:
-            conn.execute(
-                text("UPDATE inventory SET current_stock = current_stock - :q WHERE item_name = :i"),
-                {"q": quantity, "i": item}
-            )
-            conn.commit()
-
-    return {
-        "fulfilled": True,
-        "items_sold": items_sold,
-        "total_amount": total_amount
-    }
-
-
-
-# Set up your agents and create an orchestration agent that will manage them.
-
-inventory_agent = ToolCallingAgent(
-    name="InventoryAgent",
-    model=model,
-    tools=[check_inventory, reorder_inventory, get_inventory_snapshot],
-    description="Return ONLY valid JSON. No text. No explanation."
-)
-
-quoting_agent = ToolCallingAgent(
-    name="QuotingAgent",
-    model=model,
-    tools=[generate_quote, search_quote_history_tool],
-    description=(
-        "You are a strict JSON‑only agent. "
-        "When a payload is sent to you, you MUST call the appropriate tool. "
-        "Your final output MUST be ONLY valid JSON. "
-        "No text. No explanations. No markdown. No commentary. "
-        "No 'Observations'. No natural language. "
-        "Return exactly the JSON returned by the tool. "
-        "Do NOT add fields. Do NOT wrap it. Do NOT explain it."
-    )
-)
-
-finance_agent = ToolCallingAgent(
-    name="FinanceAgent",
-    model=model,
-    tools=[get_cash_balance_tool, generate_financial_report_tool, get_financial_snapshot],
-    description="Return ONLY valid JSON. No text. No explanation."
-)
-
-ordering_agent = ToolCallingAgent(
-    name="OrderingAgent",
-    model=model,
-    tools=[place_order, get_sales_report, finalize_sale, check_delivery_feasibility, get_cash_balance_tool],
-    description="Return ONLY valid JSON. No text. No explanation."
-)
-
-
-@tool
-def ask_inventory_agent(payload: Dict) -> str:
-    """Send a payload to the InventoryAgent.
-    
-    Args:
-        payload (Dict): The payload or inquiry to be sent to the InventoryAgent.
-    """
-    response = inventory_agent.run(
-        json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
-    )
-    return json.loads(response)
-
-@tool
-def ask_quoting_agent(payload: Dict) -> str:
-    """Send a payload to the QuotingAgent.
-
-    Args:
-        payload (Dict): The payload or inquiry to be sent to the QuotingAgent.
-    """
-    response = quoting_agent.run(
-        json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
-    )
-    return json.loads(response)
-
-@tool
-def ask_ordering_agent(payload: Dict) -> str:
-    """Send a payload to the OrderingAgent.
-    
-    Args:
-        payload (Dict): The payload or inquiry to be sent to the OrderingAgent.
-    """
-
-    response = ordering_agent.run(
-        json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
-    )
-    return json.loads(response)
-
-@tool
-def ask_finance_agent(payload: Dict) -> str:
-    """Send a payload to the FinanceAgent.
-    
-    Args:
-        payload (Dict): The payload or inquiry to be sent to the FinanceAgent.
-    """
-
-    response = finance_agent.run(
-        json.dumps(payload) + "\n\nReturn ONLY valid JSON. No text."
-    )
-    return json.loads(response)
-
-
-orchestrator = ToolCallingAgent(
-    name="Orchestrator",
-    model=model,
-    tools=[ask_inventory_agent, ask_quoting_agent, ask_finance_agent, ask_ordering_agent],
-    description="Central agent responsible for coordinating worker agents and delegating tasks to them."
-)
-
-ORCHESTRATOR_SYSTEM_PROMPT = """
-You are the Orchestrator for Beaver's Choice Paper Company.
-
-You MUST call tools to complete tasks.  
-You MUST use THIS EXACT FORMAT for tool calls:
-
-{
-  "tool": "<tool_name>",
-  "payload": { ... }
-}
-
-NEVER use parentheses.  
-NEVER use function-call syntax.  
-NEVER output plain text before the final JSON.  
-ONLY call these tools:
-
-- ask_inventory_agent
-- ask_quoting_agent
-- ask_ordering_agent
-- ask_finance_agent
-
-Your FINAL output must be a single valid JSON object.
-
-────────────────────────────────────────────
-WORKFLOW (ALL-OR-NOTHING FULFILLMENT)
-────────────────────────────────────────────
-
-STEP 1 — Parse the customer request.
-Extract:
-- items_requested: dict
-- order_size
-- event_type
-- request_date (YYYY-MM-DD)
-- delivery_deadline (optional)
-
-STEP 2 — Check inventory.
-Call:
-
-{
-  "tool": "ask_inventory_agent",
-  "payload": {
-    "item_names": list(items_requested.keys()),
-    "as_of_date": request_date
-  }
-}
-
-STEP 3 — Generate quote.
-Call:
-
-{
-  "tool": "ask_quoting_agent",
-  "payload": {
-    "order_size": order_size,
-    "as_of_date": request_date,
-    "items_requested": items_requested,
-    "event_type": event_type
-  }
-}
-
-STEP 4 — All-or-nothing fulfillment.
-If ANY item is missing:
-RETURN THIS JSON (DO NOT CALL ANY MORE TOOLS):
-
-{
-  "fulfilled": false,
-  "total_amount": 0.0,
-  "items_sold": {},
-  "unfulfilled_items": missing_items,
-  "delivery_estimate": null,
-  "customer_message": "Some items are out of stock and the order cannot be fulfilled."
-}
-
-If ALL items can be fulfilled:
-Call:
-
-{
-  "tool": "ask_ordering_agent",
-  "payload": {
-    "items_sold": items_requested,
-    "total_amount": quote.total_amount,
-    "order_date": request_date
-  }
-}
-
-STEP 5 — Delivery feasibility (optional).
-If delivery_deadline exists:
-Call:
-
-{
-  "tool": "ask_ordering_agent",
-  "payload": {
-    "quantity": sum(items_requested.values()),
-    "required_by_date": delivery_deadline,
-    "requested_date": request_date
-  }
-}
-
-STEP 6 — Final JSON response.
-Return ONLY:
-
-{
-  "fulfilled": true/false,
-  "total_amount": number,
-  "items_sold": dict,
-  "unfulfilled_items": dict,
-  "delivery_estimate": string or null,
-  "customer_message": string
-}
-
-────────────────────────────────────────────
-ERROR HANDLING
-────────────────────────────────────────────
-
-If a tool call fails or you cannot continue:
-RETURN ONLY THIS JSON:
-
-{
-  "fulfilled": false,
-  "total_amount": 0.0,
-  "items_sold": {},
-  "unfulfilled_items": {},
-  "delivery_estimate": null,
-  "customer_message": "We encountered a technical issue processing your request."
-}
-"""
-
-
-def call_orchestrator(request: str) -> str:
-    """
-    Function to send a customer request to the Orchestrator agent and receive a response.
-
-    Args:
-        request (str): The customer's request or inquiry that needs to be processed.
-    """
-    
-    prompt = ORCHESTRATOR_SYSTEM_PROMPT + "\n\nCustomer Request: " + request
-    
-    response = orchestrator.run(prompt)
-    
-    return str(response)
-
-# Run your test scenarios by writing them here. Make sure to keep track of them.
-
-def summarize_results(results: list[dict]) -> None:
-    df = pd.DataFrame(results)
-    df.to_csv("test_results.csv", index=False)
-
-    fulfilled_count = int(df["fulfilled"].sum())
-    cash_changes = int(df["cash_balance"].diff().fillna(0).ne(0).sum())
-    unfulfilled_df = df[df["fulfilled"] == False]
-
-    print("\n=== Evaluation Summary ===")
-    print(f"Fulfilled requests: {fulfilled_count}")
-    print(f"Cash balance changes: {cash_changes}")
-    print(f"Unfulfilled requests: {len(unfulfilled_df)}")
-
-    if len(unfulfilled_df) > 0:
-        print("\nSample unfulfilled requests:")
-        print(unfulfilled_df[["request_id", "unfulfilled_reason"]].head())
-
-def parse_orchestrator_response(response: str) -> Dict:
-    # Try direct JSON
-    try:
-        data = json.loads(response)
-        return data.get("payload", data)
-    except Exception:
-        pass
-
-    # Try fenced JSON
-    match = re.search(r"```json(.*?)```", response, re.DOTALL)
-    if match:
+    # 1) Already a dict
+    if isinstance(result, dict):
+        return result
+
+    # 2) If it's a string, try structured parsing
+    if isinstance(result, str):
+        s = result.strip()
+
+        # 2a) Try JSON
         try:
-            data = json.loads(match.group(1).strip())
-            return data.get("payload", data)
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                return parsed
         except Exception:
             pass
 
-    # Try repairing single quotes
+        # 2b) Try Python literal eval (safe-ish)
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        # 2c) Try to extract a dict-like substring { ... } and eval it
+        try:
+            start = s.find("{")
+            end = s.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = s[start:end+1]
+                parsed = ast.literal_eval(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception:
+            pass
+
+        # 2d) Try order-like string parsing
+        parsed = parse_order_like_string(s)
+        if parsed:
+            return parsed
+
+        # 2e) FINAL FALLBACK: extract delivery date from plain sentence
+        if isinstance(result, str):
+            # Look for a date
+            m_date = re.search(r"(\d{4}-\d{2}-\d{2})", result)
+            if m_date:
+                delivery = m_date.group(1)
+
+                # Try to recover item_name from sentence
+                m_item = re.search(r"for\s+(.+?)\s+is\s+\d{4}-\d{2}-\d{2}", result, flags=re.IGNORECASE)
+                item_name = m_item.group(1).strip() if m_item else "unknown"
+
+                # Quantity cannot be extracted from this sentence, so we fallback
+                # to the quantity we *asked* the tool to reorder.
+                # We retrieve it from the last tool call arguments:
+                try:
+                    last_step = agent.memory.steps[-1]
+                    args = getattr(last_step.action, "arguments", {})
+                    qty = args.get("quantity", None)
+                except Exception:
+                    qty = None
+
+                return {
+                    "item_name": item_name,
+                    "quantity": qty,
+                    "delivery_date": delivery,
+                    "raw_text": result,
+                }
+
+    # 3) Fallback: try agent memory last step observations
     try:
-        repaired = response.replace("'", '"')
-        data = json.loads(repaired)
-        return data.get("payload", data)
+        last_step = getattr(agent, "memory", None)
+        if last_step is not None:
+            steps = getattr(agent.memory, "steps", None)
+            if steps and len(steps) > 0:
+                obs = getattr(steps[-1], "observations", None)
+                if isinstance(obs, dict):
+                    return obs
+                if isinstance(obs, str):
+                    # try same parsing on obs string
+                    parsed = ensure_dict_from_agent_result(agent, obs)
+                    if isinstance(parsed, dict):
+                        return parsed
     except Exception:
         pass
 
-    # Final fallback
+    # 4) Nothing worked
+    raise ValueError("Unable to extract dict result from agent run() output or memory.")
+
+
+def call_agent_tool_strict(agent, prompt: str, retry_prompt: Optional[str] = None) -> Any:
+    """
+    Call agent.run(prompt). If the result is a string (final answer) or parsing fails,
+    retry once with a stricter instruction that forces a tool-only call.
+    Returns the raw agent.run() result (not parsed).
+    """
+    raw = agent.run(prompt)
+    # If it's already a dict, return immediately
+    if isinstance(raw, dict):
+        return raw
+
+    # If it's a string, try to parse quickly; if parsing fails, retry once with strict prompt
+    try:
+        _ = ensure_dict_from_agent_result(agent, raw)
+        return raw
+    except Exception:
+        # Build a strict retry prompt if not provided
+        strict = retry_prompt or (
+            "Use ONLY the tool. Do NOT produce a natural-language final answer. "
+            + prompt
+        )
+        raw2 = agent.run(strict)
+        return raw2
+    
+    
+def parse_request_from_csv_row(row):
+    """
+    Convert a row from quote_requests_sample.csv into a structured request
+    for the multi-agent orchestrator.
+    """
+    
+    raw_text = row["request"]
+    event_type = row["event"]
+    order_size = row["need_size"]
+    request_date = row["request_date"].strftime("%Y-%m-%d")
+
+    delivery_match = re.search(r"by ([A-Za-z]+\s+\d{1,2},\s*\d{4})", raw_text)
+    delivery_date = (
+        datetime.strptime(delivery_match.group(1), "%B %d, %Y").strftime("%Y-%m-%d")
+        if delivery_match else None
+    )
+
+    items = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+
+        # match patterns like:
+        # - 50 sheets of cardstock
+        # - 50 cardstock
+        # - 50 units cardstock
+        m = re.match(r"-?\s*(\d+)\s+(?:\w+\s+)?(?:of\s+)?(.+)", line, flags=re.IGNORECASE)
+        if m:
+            qty = int(m.group(1))
+            name = m.group(2).strip()
+            items.append({"item_name": name, "quantity": qty})
+
     return {
-        "fulfilled": False,
-        "total_amount": 0.0,
-        "items_sold": {},
-        "unfulfilled_items": {},
-        "delivery_estimate": None,
-        "reason": "Invalid JSON returned by orchestrator.",
-        "customer_message": "We encountered a technical issue while processing your request."
+        "type": "quote",
+        "as_of_date": request_date,
+        "delivery_date": delivery_date,
+        "items": items,
+        "event_type": event_type,
+        "order_size": order_size,
+        "raw_text": raw_text,
     }
 
+import json
+from typing import Dict, List
+
+import json
+from typing import Dict, List
+
+def format_money(v: float) -> str:
+    return f"${v:,.2f}"
+
+def quote_total(quote: Dict) -> float:
+    return float(quote.get("total_amount", 0.0))
+
+def compute_fulfilled_items_compact(quote: Dict) -> str:
+    """
+    Returns a compact semicolon-separated string of fulfilled items:
+    "A4 glossy paper: 200/200 (fully); heavy cardstock: 0/100 (none)"
+    Only include items with any fulfilled quantity (available > 0).
+    """
+    lines = quote.get("line_items", [])
+    entries = []
+    for li in lines:
+        name = li.get("item_name", "unknown")
+        requested = int(li.get("requested_qty", 0))
+        available = li.get("available_stock", 0) or 0
+        try:
+            available = int(float(available))
+        except Exception:
+            available = 0
+        fulfilled = min(available, requested)
+        if fulfilled > 0:
+            status = "fully" if fulfilled >= requested else "partial"
+            entries.append(f"{name}: {fulfilled}/{requested} ({status})")
+    return "; ".join(entries)
+
+def build_human_response(quote: Dict, reorders: List[Dict]) -> str:
+    """
+    Build a short human-friendly sentence describing availability and restocks.
+    Prioritize readable phrasing similar to the example the user provided.
+    """
+    lines = quote.get("line_items", [])
+    available_names = []
+    insufficient_names = []
+    for li in lines:
+        name = li.get("item_name", "unknown")
+        requested = int(li.get("requested_qty", 0))
+        available = li.get("available_stock", 0) or 0
+        try:
+            available = int(float(available))
+        except Exception:
+            available = 0
+        if available >= requested and requested > 0:
+            available_names.append(name)
+        elif requested > 0:
+            insufficient_names.append(name)
+
+    parts = []
+    if available_names:
+        # natural join with commas and 'and'
+        if len(available_names) == 1:
+            parts.append(f"{available_names[0]} is available in sufficient quantity.")
+        else:
+            last = available_names[-1]
+            rest = ", ".join(available_names[:-1])
+            parts.append(f"{rest} and {last} are available in sufficient quantities.")
+    if insufficient_names:
+        # mention restock if reorders exist for those items
+        restock_msgs = []
+        for r in reorders:
+            rn = r.get("item_name", "")
+            # normalize names: some reorder parsers include qty text; prefer matching by substring
+            for ins in insufficient_names:
+                if ins.lower() in rn.lower() or rn.lower() in ins.lower():
+                    date = r.get("delivery_date")
+                    restock_msgs.append(f"{ins} is insufficient, restock expected {date}.")
+                    break
+            else:
+                # no matching reorder found; generic note
+                pass
+        if restock_msgs:
+            parts.append(" ".join(restock_msgs))
+        else:
+            # generic insufficient message
+            if len(insufficient_names) == 1:
+                parts.append(f"{insufficient_names[0]} is insufficient and will require restocking.")
+            else:
+                last = insufficient_names[-1]
+                rest = ", ".join(insufficient_names[:-1])
+                parts.append(f"{rest} and {last} are insufficient and will require restocking.")
+
+    if not parts:
+        parts.append("No items requested or all items handled.")
+
+    # Compose final short response
+    return " ".join(parts)
+
+def build_csv_row(request_id: int,
+                  as_of: str,
+                  cash_balance: float,
+                  inventory_value: float,
+                  orchestrator_result: Dict) -> Dict:
+    quote = orchestrator_result.get("quote", {})
+    reorders = orchestrator_result.get("reorders", [])
+
+    row = {
+        "request_id": request_id,
+        "request_date": as_of,
+        "cash_balance": round(cash_balance, 2),
+        "inventory_value": round(inventory_value, 2),
+        "quote_total": round(quote_total(quote), 2),
+        "fulfilled_items": compute_fulfilled_items_compact(quote),
+        "response": build_human_response(quote, reorders)
+    }
+    return row
+
 def run_test_scenarios():
-    
+
     print("Initializing Database...")
     init_database(db_engine)
+
     try:
         quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         quote_requests_sample["request_date"] = pd.to_datetime(
@@ -1280,134 +1294,75 @@ def run_test_scenarios():
         print(f"FATAL: Error loading test data: {e}")
         return
 
-    # Get initial state
     initial_date = quote_requests_sample["request_date"].min().strftime("%Y-%m-%d")
-    report = generate_financial_report_tool(initial_date)
+    report = generate_financial_report(initial_date)
     current_cash = report["cash_balance"]
     current_inventory = report["inventory_value"]
 
-    ############
-    ############
-    ############
-    # INITIALIZE YOUR MULTI AGENT SYSTEM HERE
-    ############
-    ############
-    ############
-    
-    inv_df = pd.read_sql("SELECT * FROM inventory", db_engine)
-    price_map = dict(zip(inv_df["item_name"], inv_df["unit_price"]))
+    orchestrator = Orchestrator()
 
     results = []
-    for idx, row in quote_requests_sample.iterrows():
-        request_date = row["request_date"].strftime("%Y-%m-%d")
-        order_size = str(row.get("order_size", "small")).lower().strip()
-
-        print(f"\n=== Request {idx+1} ===")
-        print(f"Context: {row['job']} organizing {row['event']}")
-        print(f"Request Date: {request_date}")
-        print(f"Cash Balance: ${current_cash:.2f}")
-        print(f"Inventory Value: ${current_inventory:.2f}")
-
-        # Process request
-        #request_with_date = f"{row['request']} (Date of request: {request_date}, Order size: {order_size})"
-        request_with_date = f"{row['request']} ({request_date})"
-        response = call_orchestrator(request_with_date)
-
-        ############
-        ############
-        ############
-        # USE YOUR MULTI AGENT SYSTEM TO HANDLE THE REQUEST
-        ############
-        ############
-        ############
-
-        # response = call_your_multi_agent_system(request_with_date)
-        
-        response_data = parse_orchestrator_response(response)
-            
-        fulfilled = response_data.get("fulfilled", False)
-        total_amount = response_data.get("total_amount", 0.0)
-        items_sold = response_data.get("items_sold", {})
-        reason = response_data.get("reason", "")
-        
-        order_response = None
-
-        if fulfilled and items_sold and total_amount > 0:
-            order_response = place_order({
-                "payload": {
-                    "items_sold": items_sold,
-                    "total_amount": total_amount,
-                    "order_date": request_date
-                }
-            })
-            print(f"Order Response: {order_response}")
-
-        if order_response is not None:
-            print("Order Recorded")
-
-        # Update state
-        report = generate_financial_report_tool(request_date)
-        current_cash = report["cash_balance"]
-        current_inventory = report["inventory_value"]
-
-        print(f"Fulfilled: {fulfilled}, Total: {total_amount}")
-        print(f"Updated Cash: ${current_cash:.2f}")
-        print(f"Updated Inventory: ${current_inventory:.2f}")
-
-        results.append(
-            {
-                "request_id": idx + 1,
-                "request_date": request_date,
-                "fulfilled": fulfilled,
-                "total_amount": total_amount,
-                "items_sold": json.dumps(items_sold),
-                "cash_balance": current_cash,
-                "inventory_value": current_inventory,
-                "unfulfilled_reason": reason,
-                "response": json.dumps(response_data)
-            }
+    
+    # CSV writer with your new columns
+    with open("test_results.csv", "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "request_id",
+                "request_date",
+                "cash_balance",
+                "inventory_value",
+                "quote_total",
+                "fulfilled_items",
+                "response",
+            ],
         )
+        writer.writeheader()
 
-        time.sleep(1)
+        for idx, row in quote_requests_sample.iterrows():
+            request_date = row["request_date"].strftime("%Y-%m-%d")
 
-    summarize_results(results)
+            print(f"\n=== Request {idx+1} ===")
+            print(f"Context: {row['job']} organizing {row['event']}")
+            print(f"Request Date: {request_date}")
+            print(f"Cash Balance: ${current_cash:.2f}")
+            print(f"Inventory Value: ${current_inventory:.2f}")
 
-    print("\n==================== ORDER SUMMARY ====================")
-    print(f"Request Date:        {request_date}")
-    print(f"Fulfilled:           {fulfilled}")
-    print(f"Total Amount:        ${total_amount:.2f}")
-    print(f"Reason:              {reason or 'N/A'}")
+            structured_request = parse_request_from_csv_row(row)
 
-    if items_sold:
-        print("\nItems Sold:")
-        for item, qty in items_sold.items():
-            stock_after = get_stock_level(item, request_date)["current_stock"].iloc[0]
-            print(f"  - {item}: {qty} units (remaining stock: {stock_after})")
-    else:
-        print("\nItems Sold:          None")
+            orchestrator_result = orchestrator.run(structured_request)
 
-    if order_response:
-        print("\nOrder Recorded:")
-        print(f"  {order_response}")
+            # Update financials after the run
+            report = generate_financial_report(request_date)
+            current_cash = report["cash_balance"]
+            current_inventory = report["inventory_value"]
 
-    print("\n==================== FINANCIALS =======================")
-    print(f"Cash Balance:        ${current_cash:,.2f}")
-    print(f"Inventory Value:     ${current_inventory:,.2f}")
-    print(f"Total Assets:        ${report['total_assets']:,.2f}")
+            # Build the CSV row using your new helper
+            csv_row = build_csv_row(
+                request_id=idx + 1,
+                as_of=request_date,
+                cash_balance=current_cash,
+                inventory_value=current_inventory,
+                orchestrator_result=orchestrator_result,
+            )
 
-    print("\nTop Selling Products:")
-    if report["top_selling_products"]:
-        for row in report["top_selling_products"]:
-            print(f"  - {row['item_name']}: {row['total_units']} units, ${row['total_revenue']:.2f}")
-    else:
-        print("  No sales yet.")
+            print(f"Response: {csv_row['response']}")
+            print(f"Updated Cash: ${current_cash:.2f}")
+            print(f"Updated Inventory: ${current_inventory:.2f}")
 
-    print("========================================================\n")
+            writer.writerow(csv_row)
+            results.append(csv_row)
 
-    # Save results
+            time.sleep(1)
+
+    final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")
+    final_report = generate_financial_report(final_date)
+    print("\n===== FINAL FINANCIAL REPORT =====")
+    print(f"Final Cash: ${final_report['cash_balance']:.2f}")
+    print(f"Final Inventory: ${final_report['inventory_value']:.2f}")
+
     pd.DataFrame(results).to_csv("test_results.csv", index=False)
     return results
-
 
 if __name__ == "__main__":
     results = run_test_scenarios()
