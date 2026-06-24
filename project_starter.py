@@ -907,15 +907,52 @@ class Orchestrator:
             f"Call generate_quote_tool with items={items}, as_of_date='{as_of}', event_type='{event_type}'."
         )
         quote = ensure_dict_from_agent_result(self.quoting, raw_quote)
-        """ 
-        raw_quote = self.quoting.run(
-            f"Use ONLY generate_quote_tool. Do NOT produce a natural-language final answer. "
-            f"Call generate_quote_tool with items={items}, as_of_date='{as_of}', event_type='{event_type}'."
-        )
-        quote = ensure_dict_from_agent_result(self.quoting, raw_quote)
-        """
+       
+        #2. Fulfill available items and reorder missing items
+        fulfilled_items = []
 
-        # 2. Reorder missing items based on quote's available_stock
+        for line in quote["line_items"]:
+            item_name = line["item_name"]
+            requested = int(line["requested_qty"])
+            available = int(float(line["available_stock"] or 0))
+
+            # Fulfillable amount
+            fulfill_qty = min(requested, available)
+
+            if fulfill_qty > 0:
+                # Record fulfillment
+                fulfilled_items.append({
+                    "item_name": item_name,
+                    "quantity": fulfill_qty
+                })
+
+                # FINALIZE THE SALE (this is the missing piece)
+                self.ordering.run(
+                    f"Use ONLY place_sales_order_tool. "
+                    f"Do NOT produce a natural-language final answer. "
+                    f"Call place_sales_order_tool with item_name='{item_name}', "
+                    f"quantity={fulfill_qty}, "
+                    f"unit_price={line['unit_price']}, "
+                    f"order_date='{as_of}'."
+                )
+
+                # Reduce available stock for reorder calculation
+                remaining = requested - fulfill_qty
+            else:
+                remaining = requested
+
+            # Reorder remaining quantity
+            if remaining > 0:
+                raw_reorder = call_agent_tool_strict(
+                    self.inventory,
+                    f"Call reorder_inventory_tool with item_name='{item_name}', "
+                    f"quantity={remaining}, order_date='{as_of}'."
+                )
+                reorder_info = ensure_dict_from_agent_result(self.inventory, raw_reorder)
+                reorders.append(reorder_info)
+
+
+        # 3. Reorder missing items based on quote's available_stock
         reorders = []
         for line in quote.get("line_items", []):
             # ensure numeric types
@@ -1263,7 +1300,7 @@ def build_csv_row(request_id: int,
                   as_of: str,
                   cash_balance: float,
                   inventory_value: float,
-                  orchestrator_result: Dict) -> Dict:
+                  orchestrator_result: Dict,) -> Dict:
     quote = orchestrator_result.get("quote", {})
     reorders = orchestrator_result.get("reorders", [])
 
@@ -1361,7 +1398,6 @@ def run_test_scenarios():
     print(f"Final Cash: ${final_report['cash_balance']:.2f}")
     print(f"Final Inventory: ${final_report['inventory_value']:.2f}")
 
-    pd.DataFrame(results).to_csv("test_results.csv", index=False)
     return results
 
 if __name__ == "__main__":
