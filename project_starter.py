@@ -1237,83 +1237,89 @@ def compute_fulfilled_items_compact(quote: Dict) -> str:
 
 def build_human_response(quote: Dict, reorders: List[Dict]) -> str:
     """
-    Build a short human-friendly sentence describing availability and restocks.
-    Prioritize readable phrasing similar to the example the user provided.
+    Customer-facing explanation:
+    - Includes quote total
+    - Includes per-item pricing
+    - Explains fulfillment vs restock
+    - Does NOT reveal internal margin
     """
+
+    total = quote.get("total_amount", 0.0)
     lines = quote.get("line_items", [])
+
+    # Build item pricing summary
+    if lines:
+        item_parts = []
+        for li in lines:
+            name = li.get("item_name", "item")
+            qty = int(li.get("requested_qty", 0))
+            price = float(li.get("unit_price", 0))
+            item_parts.append(f"{name} ({qty} units at ${price:.2f} each)")
+        item_summary = "; ".join(item_parts)
+        price_text = f"Your quote total is ${total:.2f} for: {item_summary}."
+    else:
+        price_text = "No items were requested."
+
+    # Build fulfillment / restock explanation
     available_names = []
-    insufficient_names = []
+    insufficient_msgs = []
+
     for li in lines:
-        name = li.get("item_name", "unknown")
+        name = li.get("item_name", "item")
         requested = int(li.get("requested_qty", 0))
-        available = li.get("available_stock", 0) or 0
-        try:
-            available = int(float(available))
-        except Exception:
-            available = 0
+        available = int(float(li.get("available_stock", 0) or 0))
+
         if available >= requested and requested > 0:
             available_names.append(name)
-        elif requested > 0:
-            insufficient_names.append(name)
+        else:
+            # Find matching reorder
+            restock_date = None
+            for r in reorders:
+                rn = r.get("item_name", "")
+                if name.lower() in rn.lower() or rn.lower() in name.lower():
+                    restock_date = r.get("delivery_date")
+                    break
+            if restock_date:
+                insufficient_msgs.append(f"{name} is insufficient, restock expected {restock_date}.")
+            else:
+                insufficient_msgs.append(f"{name} is insufficient and will require restocking.")
 
-    parts = []
+    # Build availability text
+    availability_parts = []
     if available_names:
-        # natural join with commas and 'and'
         if len(available_names) == 1:
-            parts.append(f"{available_names[0]} is available in sufficient quantity.")
+            availability_parts.append(f"{available_names[0]} is available in sufficient quantity.")
         else:
             last = available_names[-1]
             rest = ", ".join(available_names[:-1])
-            parts.append(f"{rest} and {last} are available in sufficient quantities.")
-    if insufficient_names:
-        # mention restock if reorders exist for those items
-        restock_msgs = []
-        for r in reorders:
-            rn = r.get("item_name", "")
-            # normalize names: some reorder parsers include qty text; prefer matching by substring
-            for ins in insufficient_names:
-                if ins.lower() in rn.lower() or rn.lower() in ins.lower():
-                    date = r.get("delivery_date")
-                    restock_msgs.append(f"{ins} is insufficient, restock expected {date}.")
-                    break
-            else:
-                # no matching reorder found; generic note
-                pass
-        if restock_msgs:
-            parts.append(" ".join(restock_msgs))
-        else:
-            # generic insufficient message
-            if len(insufficient_names) == 1:
-                parts.append(f"{insufficient_names[0]} is insufficient and will require restocking.")
-            else:
-                last = insufficient_names[-1]
-                rest = ", ".join(insufficient_names[:-1])
-                parts.append(f"{rest} and {last} are insufficient and will require restocking.")
+            availability_parts.append(f"{rest} and {last} are available in sufficient quantities.")
 
-    if not parts:
-        parts.append("No items requested or all items handled.")
+    if insufficient_msgs:
+        availability_parts.extend(insufficient_msgs)
 
-    # Compose final short response
-    return " ".join(parts)
+    availability_text = " ".join(availability_parts) if availability_parts else ""
+
+    # Final combined response
+    return f"{price_text} {availability_text}".strip()
 
 def build_csv_row(request_id: int,
                   as_of: str,
                   cash_balance: float,
                   inventory_value: float,
-                  orchestrator_result: Dict,) -> Dict:
+                  orchestrator_result: Dict) -> Dict:
+
     quote = orchestrator_result.get("quote", {})
     reorders = orchestrator_result.get("reorders", [])
 
-    row = {
+    return {
         "request_id": request_id,
         "request_date": as_of,
         "cash_balance": round(cash_balance, 2),
         "inventory_value": round(inventory_value, 2),
-        "quote_total": round(quote_total(quote), 2),
+        "quote_total": round(quote.get("total_amount", 0.0), 2),
         "fulfilled_items": compute_fulfilled_items_compact(quote),
-        "response": build_human_response(quote, reorders)
+        "response": build_human_response(quote, reorders),
     }
-    return row
 
 def run_test_scenarios():
 
