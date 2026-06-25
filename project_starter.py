@@ -892,22 +892,12 @@ class Orchestrator:
         self.ordering = OrderingAgent()
 
     def run(self, structured_request: dict):
-        """
-        Main orchestrator entrypoint.
-        Handles:
-        1. Quote generation
-        2. Fulfillment from stock
-        3. Sales order placement
-        4. Reorders for missing quantities
-        """
 
         as_of = structured_request["as_of_date"]
         items = structured_request["items"]
         event_type = structured_request.get("event_type")
 
-        # -----------------------------
         # 1. Generate quote
-        # -----------------------------
         raw_quote = call_agent_tool_strict(
             self.quoting,
             f"Call generate_quote_tool with items={items}, "
@@ -915,11 +905,10 @@ class Orchestrator:
         )
         quote = ensure_dict_from_agent_result(self.quoting, raw_quote)
 
-        # -----------------------------
-        # 2. Fulfill from stock + sales
-        # -----------------------------
         fulfilled_items = []
         reorders = []
+
+        AUTO_FULFILL_THRESHOLD = 50
 
         for line in quote.get("line_items", []):
             item_name = line["item_name"]
@@ -927,22 +916,18 @@ class Orchestrator:
             available = int(float(line.get("available_stock", 0) or 0))
             unit_price = float(line["unit_price"])
 
-            # How much can we fulfill right now?
+            # 2A. Fulfill from stock
             fulfill_qty = min(requested, available)
 
-            # -----------------------------
-            # 2A. Fulfill from stock
-            # -----------------------------
             if fulfill_qty > 0:
                 fulfilled_items.append({
                     "item_name": item_name,
                     "quantity": fulfill_qty
                 })
 
-                # Place sales order (THIS WAS MISSING BEFORE)
+                # Place sales order for fulfilled portion
                 self.ordering.run(
                     f"Use ONLY place_sales_order_tool. "
-                    f"Do NOT produce a natural-language final answer. "
                     f"Call place_sales_order_tool with "
                     f"item_name='{item_name}', "
                     f"quantity={fulfill_qty}, "
@@ -950,17 +935,11 @@ class Orchestrator:
                     f"order_date='{as_of}'."
                 )
 
-            # Remaining quantity after fulfillment
             remaining = requested - fulfill_qty
 
-            # -----------------------------
-            # 3. Reorder missing quantities
-            # -----------------------------
-            AUTO_FULFILL_THRESHOLD = 50  # you can tune this
-
+            # 2B. Option B auto-fulfill small remaining qty
             if remaining > 0 and remaining <= AUTO_FULFILL_THRESHOLD:
-                # Treat as fully fulfillable
-                fulfill_qty = requested
+                fulfill_qty = remaining
                 remaining = 0
 
                 fulfilled_items.append({
@@ -968,10 +947,8 @@ class Orchestrator:
                     "quantity": fulfill_qty
                 })
 
-                # Place sales order for the full amount
                 self.ordering.run(
                     f"Use ONLY place_sales_order_tool. "
-                    f"Do NOT produce a natural-language final answer. "
                     f"Call place_sales_order_tool with "
                     f"item_name='{item_name}', "
                     f"quantity={fulfill_qty}, "
@@ -979,16 +956,34 @@ class Orchestrator:
                     f"order_date='{as_of}'."
                 )
 
-        # -----------------------------
-        # 4. Return structured result
-        # -----------------------------
+            # 3. Reorder remaining quantity
+            if remaining > 0:
+                raw_reorder = call_agent_tool_strict(
+                    self.inventory,
+                    f"Call reorder_inventory_tool with "
+                    f"item_name='{item_name}', "
+                    f"quantity={remaining}, "
+                    f"order_date='{as_of}'."
+                )
+                reorder_info = ensure_dict_from_agent_result(self.inventory, raw_reorder)
+                reorders.append(reorder_info)
+
+                # Place stock order (purchase)
+                self.ordering.run(
+                    f"Use ONLY place_stock_order_tool. "
+                    f"Call place_stock_order_tool with "
+                    f"item_name='{item_name}', "
+                    f"quantity={remaining}, "
+                    f"unit_price={unit_price}, "
+                    f"order_date='{as_of}'."
+                )
+
         return {
             "quote": quote,
             "fulfilled_items": fulfilled_items,
             "reorders": reorders,
             "delivery_date_requested": structured_request.get("delivery_date"),
         }
-
 
 # -----------------------
 # HELPER FUNCTIONS
