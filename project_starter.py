@@ -956,24 +956,25 @@ class Orchestrator:
             # -----------------------------
             # 3. Reorder missing quantities
             # -----------------------------
-            if remaining > 0:
-                raw_reorder = call_agent_tool_strict(
-                    self.inventory,
-                    f"Call reorder_inventory_tool with "
-                    f"item_name='{item_name}', "
-                    f"quantity={remaining}, "
-                    f"order_date='{as_of}'."
-                )
-                reorder_info = ensure_dict_from_agent_result(self.inventory, raw_reorder)
-                reorders.append(reorder_info)
+            AUTO_FULFILL_THRESHOLD = 50  # you can tune this
 
-                # Also place stock order (purchase)
+            if remaining > 0 and remaining <= AUTO_FULFILL_THRESHOLD:
+                # Treat as fully fulfillable
+                fulfill_qty = requested
+                remaining = 0
+
+                fulfilled_items.append({
+                    "item_name": item_name,
+                    "quantity": fulfill_qty
+                })
+
+                # Place sales order for the full amount
                 self.ordering.run(
-                    f"Use ONLY place_stock_order_tool. "
+                    f"Use ONLY place_sales_order_tool. "
                     f"Do NOT produce a natural-language final answer. "
-                    f"Call place_stock_order_tool with "
+                    f"Call place_sales_order_tool with "
                     f"item_name='{item_name}', "
-                    f"quantity={remaining}, "
+                    f"quantity={fulfill_qty}, "
                     f"unit_price={unit_price}, "
                     f"order_date='{as_of}'."
                 )
