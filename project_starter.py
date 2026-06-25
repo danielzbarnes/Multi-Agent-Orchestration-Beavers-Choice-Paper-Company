@@ -894,96 +894,96 @@ class Orchestrator:
     def run(self, structured_request: dict):
         """
         Main orchestrator entrypoint.
-        Calls worker agents in the correct order and returns a unified response.
+        Handles:
+        1. Quote generation
+        2. Fulfillment from stock
+        3. Sales order placement
+        4. Reorders for missing quantities
         """
 
         as_of = structured_request["as_of_date"]
         items = structured_request["items"]
         event_type = structured_request.get("event_type")
 
-        # 1. Generate quote (agent call)
+        # -----------------------------
+        # 1. Generate quote
+        # -----------------------------
         raw_quote = call_agent_tool_strict(
             self.quoting,
-            f"Call generate_quote_tool with items={items}, as_of_date='{as_of}', event_type='{event_type}'."
+            f"Call generate_quote_tool with items={items}, "
+            f"as_of_date='{as_of}', event_type='{event_type}'."
         )
         quote = ensure_dict_from_agent_result(self.quoting, raw_quote)
-       
-        #2. Fulfill available items and reorder missing items
-        fulfilled_items = []
 
-        for line in quote["line_items"]:
+        # -----------------------------
+        # 2. Fulfill from stock + sales
+        # -----------------------------
+        fulfilled_items = []
+        reorders = []
+
+        for line in quote.get("line_items", []):
             item_name = line["item_name"]
             requested = int(line["requested_qty"])
-            available = int(float(line["available_stock"] or 0))
+            available = int(float(line.get("available_stock", 0) or 0))
+            unit_price = float(line["unit_price"])
 
-            # Fulfillable amount
+            # How much can we fulfill right now?
             fulfill_qty = min(requested, available)
 
+            # -----------------------------
+            # 2A. Fulfill from stock
+            # -----------------------------
             if fulfill_qty > 0:
-                # Record fulfillment
                 fulfilled_items.append({
                     "item_name": item_name,
                     "quantity": fulfill_qty
                 })
 
-                # FINALIZE THE SALE (this is the missing piece)
+                # Place sales order (THIS WAS MISSING BEFORE)
                 self.ordering.run(
                     f"Use ONLY place_sales_order_tool. "
                     f"Do NOT produce a natural-language final answer. "
-                    f"Call place_sales_order_tool with item_name='{item_name}', "
+                    f"Call place_sales_order_tool with "
+                    f"item_name='{item_name}', "
                     f"quantity={fulfill_qty}, "
-                    f"unit_price={line['unit_price']}, "
+                    f"unit_price={unit_price}, "
                     f"order_date='{as_of}'."
                 )
 
-                # Reduce available stock for reorder calculation
-                remaining = requested - fulfill_qty
-            else:
-                remaining = requested
+            # Remaining quantity after fulfillment
+            remaining = requested - fulfill_qty
 
-            # Reorder remaining quantity
+            # -----------------------------
+            # 3. Reorder missing quantities
+            # -----------------------------
             if remaining > 0:
                 raw_reorder = call_agent_tool_strict(
                     self.inventory,
-                    f"Call reorder_inventory_tool with item_name='{item_name}', "
-                    f"quantity={remaining}, order_date='{as_of}'."
+                    f"Call reorder_inventory_tool with "
+                    f"item_name='{item_name}', "
+                    f"quantity={remaining}, "
+                    f"order_date='{as_of}'."
                 )
                 reorder_info = ensure_dict_from_agent_result(self.inventory, raw_reorder)
                 reorders.append(reorder_info)
 
-
-        # 3. Reorder missing items based on quote's available_stock
-        reorders = []
-        for line in quote.get("line_items", []):
-            # ensure numeric types
-            try:
-                available = int(line.get("available_stock", 0))
-            except Exception:
-                available = int(float(line.get("available_stock", 0) or 0))
-            try:
-                requested = int(line.get("requested_qty", 0))
-            except Exception:
-                requested = int(float(line.get("requested_qty", 0) or 0))
-
-            if available < requested:
-                missing = requested - available
-
-                raw_reorder = self.inventory.run(
-                    f"Use ONLY reorder_inventory_tool. Do NOT produce a natural-language final answer. "
-                    f"Call reorder_inventory_tool with item_name='{line['item_name']}', quantity={missing}, order_date='{as_of}'."
-                )
-                reorder_info = ensure_dict_from_agent_result(self.inventory, raw_reorder)
-
-                # place stock order (we don't need its return value here, but keep agent call)
+                # Also place stock order (purchase)
                 self.ordering.run(
-                    f"Use ONLY place_stock_order_tool. Do NOT produce a natural-language final answer. "
-                    f"Call place_stock_order_tool with item_name='{line['item_name']}', quantity={missing}, unit_price={line['unit_price']}, order_date='{as_of}'."
+                    f"Use ONLY place_stock_order_tool. "
+                    f"Do NOT produce a natural-language final answer. "
+                    f"Call place_stock_order_tool with "
+                    f"item_name='{item_name}', "
+                    f"quantity={remaining}, "
+                    f"unit_price={unit_price}, "
+                    f"order_date='{as_of}'."
                 )
 
-                reorders.append(reorder_info)
-
+        # -----------------------------
+        # 4. Return structured result
+        # -----------------------------
         return {
             "quote": quote,
+            "fulfilled_items": fulfilled_items,
             "reorders": reorders,
             "delivery_date_requested": structured_request.get("delivery_date"),
         }
