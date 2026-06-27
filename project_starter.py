@@ -880,7 +880,7 @@ class OrderingAgent(BaseWorkerAgent):
             name="ordering_agent",
             description="Places sales orders and stock orders."
         )
-        
+                
 # -----------------------
 # ORCHESTRATOR
 # -----------------------
@@ -903,6 +903,7 @@ class Orchestrator:
             f"Call generate_quote_tool with items={items}, "
             f"as_of_date='{as_of}', event_type='{event_type}'."
         )
+        print("RAW QUOTE OUTPUT:", raw_quote)
         quote = ensure_dict_from_agent_result(self.quoting, raw_quote)
 
         fulfilled_items = []
@@ -1172,6 +1173,7 @@ def parse_request_from_csv_row(row):
         datetime.strptime(delivery_match.group(1), "%B %d, %Y").strftime("%Y-%m-%d")
         if delivery_match else None
     )
+
     items = []
 
     # Normalize lines
@@ -1195,6 +1197,16 @@ def parse_request_from_csv_row(row):
             name = m.group(2).strip()
             items.append({"item_name": name, "quantity": qty})
             continue
+
+    return {
+        "type": "quote",
+        "as_of_date": request_date,
+        "delivery_date": delivery_date,
+        "items": items,
+        "event_type": event_type,
+        "order_size": order_size,
+        "raw_text": raw_text,
+    }
 
 import json
 from typing import Dict, List
@@ -1232,43 +1244,34 @@ def compute_fulfilled_items_compact(quote: Dict) -> str:
 
 def build_human_response(quote: Dict, reorders: List[Dict]) -> str:
     """
-    Customer-facing letter-style response.
-    Includes:
-    - Greeting
-    - Summary of requested items + pricing
-    - Fulfilled items
-    - Unavailable items + restock dates
-    - Polite closing
+    Compact, single-line customer-facing explanation.
+    Explains:
+    - What was fulfilled
+    - What was not
+    - Why the quote total is zero (if applicable)
+    - Restock dates
+    - Optional alternatives
     """
 
-    total = quote.get("total_amount", 0.0)
+    total = float(quote.get("total_amount", 0.0))
     lines = quote.get("line_items", [])
 
-    # -----------------------------
-    # Build item summary
-    # -----------------------------
-    requested_items = []
-    for li in lines:
-        name = li.get("item_name", "item")
-        qty = int(li.get("requested_qty", 0))
-        price = float(li.get("unit_price", 0))
-        requested_items.append(f"- {qty} units of {name} at ${price:.2f} each")
-
-    requested_text = "\n".join(requested_items) if requested_items else "No items were requested."
-
-    # -----------------------------
-    # Fulfilled vs Unavailable
-    # -----------------------------
     fulfilled = []
     unavailable = []
+    alternatives = []
 
+    # Detect if no items were parsed at all
+    if not lines:
+        return "No valid items were recognized in your request, so no quote could be generated."
+
+    # Build fulfillment and unavailability lists
     for li in lines:
         name = li.get("item_name", "item")
         requested = int(li.get("requested_qty", 0))
         available = int(float(li.get("available_stock", 0) or 0))
 
-        if available >= requested:
-            fulfilled.append(f"- {name} (fully available)")
+        if available >= requested and requested > 0:
+            fulfilled.append(f"{name} fully available")
         else:
             # Find restock date
             restock_date = None
@@ -1279,39 +1282,47 @@ def build_human_response(quote: Dict, reorders: List[Dict]) -> str:
                     break
 
             if restock_date:
-                unavailable.append(f"- {name} (restock expected {restock_date})")
+                unavailable.append(f"{name} insufficient, restock expected {restock_date}")
             else:
-                unavailable.append(f"- {name} (currently unavailable)")
+                unavailable.append(f"{name} insufficient")
 
-    fulfilled_text = "\n".join(fulfilled) if fulfilled else "None"
-    unavailable_text = "\n".join(unavailable) if unavailable else "None"
+            # Optional simple alternatives (example logic)
+            if "paper" in name.lower():
+                alternatives.append("letter-sized paper at $0.06 per sheet")
+            if "cardstock" in name.lower():
+                alternatives.append("recycled cardstock at $0.08 per sheet")
 
-    # -----------------------------
-    # Build final letter
-    # -----------------------------
-    letter = f"""
-        Dear Customer,
+    # Build explanation for zero total
+    zero_reason = ""
+    if total == 0.0:
+        if fulfilled:
+            zero_reason = "Total quoted amount is $0.00 because all items are unavailable for pricing at this time."
+        elif unavailable:
+            zero_reason = "Total quoted amount is $0.00 because none of the requested items can be fulfilled due to insufficient stock."
+        else:
+            zero_reason = "Total quoted amount is $0.00 because no valid items could be processed."
 
-        Thank you for your order request. Below is a summary of your quote:
+    # Build final single-line explanation
+    parts = []
 
-        Quote Total: ${total:.2f}
+    if fulfilled:
+        parts.append(", ".join(fulfilled) + ".")
 
-        Requested Items:
-        {requested_text}
+    if unavailable:
+        parts.append(", ".join(unavailable) + ".")
 
-        Items We Can Fulfill:
-        {fulfilled_text}
+    if zero_reason:
+        parts.append(zero_reason)
 
-        Items Currently Unavailable:
-        {unavailable_text}
+    if alternatives:
+        parts.append("Alternatives available: " + ", ".join(alternatives) + ".")
 
-        If you would like assistance selecting alternatives or adjusting quantities, we would be happy to help.
+    # Always include quote total (unless zero_reason already explains it)
+    if total > 0:
+        parts.append(f"Total quoted amount: ${total:.2f}")
 
-        Best regards,
-        Beaver's Choice Paper Company
-        """.strip()
+    return " ".join(parts).strip()
 
-    return letter
 
 
 def build_csv_row(request_id: int,
