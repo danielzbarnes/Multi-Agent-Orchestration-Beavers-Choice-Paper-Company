@@ -1233,70 +1233,87 @@ def compute_fulfilled_items_compact(quote: Dict) -> str:
 
 def build_human_response(quote: Dict, reorders: List[Dict]) -> str:
     """
-    Customer-facing explanation:
-    - Includes quote total
-    - Includes per-item pricing
-    - Explains fulfillment vs restock
-    - Does NOT reveal internal margin
+    Customer-facing letter-style response.
+    Includes:
+    - Greeting
+    - Summary of requested items + pricing
+    - Fulfilled items
+    - Unavailable items + restock dates
+    - Polite closing
     """
 
     total = quote.get("total_amount", 0.0)
     lines = quote.get("line_items", [])
 
-    # Build item pricing summary
-    if lines:
-        item_parts = []
-        for li in lines:
-            name = li.get("item_name", "item")
-            qty = int(li.get("requested_qty", 0))
-            price = float(li.get("unit_price", 0))
-            item_parts.append(f"{name} ({qty} units at ${price:.2f} each)")
-        item_summary = "; ".join(item_parts)
-        price_text = f"Your quote total is ${total:.2f} for: {item_summary}."
-    else:
-        price_text = "No items were requested."
+    # -----------------------------
+    # Build item summary
+    # -----------------------------
+    requested_items = []
+    for li in lines:
+        name = li.get("item_name", "item")
+        qty = int(li.get("requested_qty", 0))
+        price = float(li.get("unit_price", 0))
+        requested_items.append(f"- {qty} units of {name} at ${price:.2f} each")
 
-    # Build fulfillment / restock explanation
-    available_names = []
-    insufficient_msgs = []
+    requested_text = "\n".join(requested_items) if requested_items else "No items were requested."
+
+    # -----------------------------
+    # Fulfilled vs Unavailable
+    # -----------------------------
+    fulfilled = []
+    unavailable = []
 
     for li in lines:
         name = li.get("item_name", "item")
         requested = int(li.get("requested_qty", 0))
         available = int(float(li.get("available_stock", 0) or 0))
 
-        if available >= requested and requested > 0:
-            available_names.append(name)
+        if available >= requested:
+            fulfilled.append(f"- {name} (fully available)")
         else:
-            # Find matching reorder
+            # Find restock date
             restock_date = None
             for r in reorders:
                 rn = r.get("item_name", "")
                 if name.lower() in rn.lower() or rn.lower() in name.lower():
                     restock_date = r.get("delivery_date")
                     break
+
             if restock_date:
-                insufficient_msgs.append(f"{name} is insufficient, restock expected {restock_date}.")
+                unavailable.append(f"- {name} (restock expected {restock_date})")
             else:
-                insufficient_msgs.append(f"{name} is insufficient and will require restocking.")
+                unavailable.append(f"- {name} (currently unavailable)")
 
-    # Build availability text
-    availability_parts = []
-    if available_names:
-        if len(available_names) == 1:
-            availability_parts.append(f"{available_names[0]} is available in sufficient quantity.")
-        else:
-            last = available_names[-1]
-            rest = ", ".join(available_names[:-1])
-            availability_parts.append(f"{rest} and {last} are available in sufficient quantities.")
+    fulfilled_text = "\n".join(fulfilled) if fulfilled else "None"
+    unavailable_text = "\n".join(unavailable) if unavailable else "None"
 
-    if insufficient_msgs:
-        availability_parts.extend(insufficient_msgs)
+    # -----------------------------
+    # Build final letter
+    # -----------------------------
+    letter = f"""
+        Dear Customer,
 
-    availability_text = " ".join(availability_parts) if availability_parts else ""
+        Thank you for your order request. Below is a summary of your quote:
 
-    # Final combined response
-    return f"{price_text} {availability_text}".strip()
+        Quote Total: ${total:.2f}
+
+        Requested Items:
+        {requested_text}
+
+        Items We Can Fulfill:
+        {fulfilled_text}
+
+        Items Currently Unavailable:
+        {unavailable_text}
+
+        If you would like assistance selecting alternatives or adjusting quantities, we would be happy to help.
+
+        Best regards,
+        Beaver's Choice Paper Company
+        """.strip()
+
+    return letter
+
 
 def build_csv_row(request_id: int,
                   as_of: str,
