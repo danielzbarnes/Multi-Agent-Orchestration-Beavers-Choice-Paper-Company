@@ -1172,30 +1172,29 @@ def parse_request_from_csv_row(row):
         datetime.strptime(delivery_match.group(1), "%B %d, %Y").strftime("%Y-%m-%d")
         if delivery_match else None
     )
-
     items = []
+
+    # Normalize lines
     for line in raw_text.splitlines():
         line = line.strip()
+        if not line:
+            continue
 
-        # match patterns like:
-        # - 50 sheets of cardstock
-        # - 50 cardstock
-        # - 50 units cardstock
-        m = re.match(r"-?\s*(\d+)\s+(?:\w+\s+)?(?:of\s+)?(.+)", line, flags=re.IGNORECASE)
+        # Pattern 1: "- 500 sheets of X"
+        m = re.match(r"-?\s*(\d+)\s+(?:sheets|sheet|packs|pack|rolls|roll|reams|ream|boxes|box|tickets|flyers|posters)\s+(?:of\s+)?(.+)", line, flags=re.IGNORECASE)
         if m:
             qty = int(m.group(1))
             name = m.group(2).strip()
             items.append({"item_name": name, "quantity": qty})
+            continue
 
-    return {
-        "type": "quote",
-        "as_of_date": request_date,
-        "delivery_date": delivery_date,
-        "items": items,
-        "event_type": event_type,
-        "order_size": order_size,
-        "raw_text": raw_text,
-    }
+        # Pattern 2: "- 500 X" (generic)
+        m = re.match(r"-?\s*(\d+)\s+(.+)", line)
+        if m:
+            qty = int(m.group(1))
+            name = m.group(2).strip()
+            items.append({"item_name": name, "quantity": qty})
+            continue
 
 import json
 from typing import Dict, List
